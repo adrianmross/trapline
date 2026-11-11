@@ -24,9 +24,11 @@ _trapline_run() {
 }
 
 # Hint first, then the original handler (a Homebrew lookup can be slow).
-# Call again after plugins that define their own handler have loaded.
+# Safe to call again: when a plugin has replaced the handler since, the new one
+# is captured and wrapped.
 _trapline_wrap_cnf() {
-  (( $+functions[_trapline_orig_cnf] )) && return 0
+  [[ "${functions[command_not_found_handler]}" == *_trapline_orig_cnf* ]] && return 0
+  unfunction _trapline_orig_cnf 2>/dev/null
   if (( $+functions[command_not_found_handler] )); then
     functions -c command_not_found_handler _trapline_orig_cnf
   else
