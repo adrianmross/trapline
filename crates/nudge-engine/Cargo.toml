@@ -1,0 +1,12 @@
+[package]
+name = "nudge-engine"
+description = "Declarative rules engine: the built-in trapline handler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+trapline-core.workspace = true
+serde.workspace = true
+toml.workspace = true

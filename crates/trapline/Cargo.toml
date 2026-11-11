@@ -1,0 +1,13 @@
+[package]
+name = "trapline"
+description = "Events at the command boundary: shell glue plus a handler protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+trapline-core.workspace = true
+nudge-engine.workspace = true
+serde_json.workspace = true
+clap.workspace = true
