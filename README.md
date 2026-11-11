@@ -52,7 +52,11 @@ trapline check pre nvim --format json
 
 ## Rules
 
+Rules live in your config, so which tools get wrapped is yours to choose:
+
 ```toml
+use = ["devenv", "git", "wt"]
+
 [[rule]]
 id    = "devenv-launch"
 tool  = ["nvim"]
@@ -61,17 +65,37 @@ when  = { root_has = "devenv.nix", env_unset = "DEVENV_ROOT" }
 do    = { wrap = ["devenv", "shell", "--no-tui", "--"] }
 ```
 
+(`examples/config.toml` is this file.)
+
 - **Phases:** `pre`, `post`, `notfound`, `chpwd`, `prompt`.
-- **Conditions** (all must hold): `root_has`, `env_set`, `env_unset`. A fixed
-  set of named checks, no scripting, so a rules file is safe to read.
-- **Actions:** `hint`, `warn`, `block`, `wrap`, `set_env`.
+- **Matching:** `tool`, `sub` (the first subcommand is one of these) and
+  `args_start` (the positional arguments start with these). Global flags such
+  as `git -C path` are skipped.
+- **Conditions** (all must hold): `root_has`, `env_set`, `env_unset`,
+  `command_missing`, `agent` (true or false), and `git = "root_off_default"`.
+  A fixed set of named checks, no scripting, so a rules file is safe to read.
+  Git state is read from `.git` directly; no `git` process runs.
+- **Actions:** `hint`, `warn`, `block`, `wrap`, `set_env`. Messages can use
+  `{branch}`, `{default}` and `{root}`.
+- **Agents:** a caller is an agent when `AGENT` or `CLAUDECODE` is set in its
+  environment. Set `AGENT=1` for anything else.
 
 See `docs/protocol.md` for the event and decision JSON that handlers speak.
 
+## Packs
+
+`nudge packs` lists them and `nudge show <pack>` prints one.
+
+| Pack | What it does |
+|---|---|
+| `devenv` | Prompt markers (`⬡ devenv` inside, `⬡ off` in a devenv repo you have not entered); a not-found hint pointing at `dev`. |
+| `git` | In a root checkout off the default branch, `commit`/`push`/`add`/`merge`/`rebase` warn a human and block an agent. Raw `git worktree add` does the same and points at `wt`. |
+| `wt` | `wt switch` warns when `devenv` is not on `PATH` (the post-switch warm-up would be skipped). `wt remove` reminds an agent to check unpushed work. |
+
 ## Status
 
-Early. Working: the event protocol, the rules engine, the `devenv` pack, zsh
-glue. Planned: `git` and `wt` packs, `once` for hints, bash and fish glue,
+Early. Working: the event protocol, the rules engine, the `devenv`, `git` and
+`wt` packs, zsh glue. Planned: `once` for hints, bash and fish glue,
 `nudge explain`, repo-level `.trapline.toml` with an allow step (repo rules
 limited to `hint`/`warn` until allowed), `trapline serve` (JSON-RPC) and an
 editor plugin.

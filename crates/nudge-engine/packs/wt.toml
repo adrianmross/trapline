@@ -1,0 +1,17 @@
+# wt (worktrunk): point at state that makes its hooks or removals go wrong.
+
+[[rule]]
+id = "wt-switch-devenv-missing"
+tool = ["wt"]
+args_start = ["switch"]
+phase = "pre"
+when = { root_has = "devenv.nix", command_missing = "devenv" }
+do = { warn = "devenv is not on PATH, so wt's post-switch warm-up will be skipped" }
+
+[[rule]]
+id = "wt-remove-agent"
+tool = ["wt"]
+args_start = ["remove"]
+phase = "pre"
+when = { agent = true }
+do = { hint = "removing deletes the branch if merged; check unpushed and uncommitted work first (wt list)" }

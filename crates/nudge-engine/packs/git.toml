@@ -1,0 +1,35 @@
+# git: keep the root checkout on the default branch; make worktrees with wt.
+# Humans get a warning; agents are blocked. An agent is any caller with AGENT or
+# CLAUDECODE set in its environment.
+
+[[rule]]
+id = "git-root-off-default"
+tool = ["git"]
+sub = ["commit", "push", "add", "merge", "rebase"]
+phase = "pre"
+when = { git = "root_off_default", agent = false }
+do = { warn = "root checkout is on '{branch}', not '{default}'; feature work belongs in a wt worktree" }
+
+[[rule]]
+id = "git-root-off-default-agent"
+tool = ["git"]
+sub = ["commit", "push", "add", "merge", "rebase"]
+phase = "pre"
+when = { git = "root_off_default", agent = true }
+do = { warn = "root checkout is on '{branch}', not '{default}'; do not edit or commit here. Use `wt switch --create <branch>`", block = true }
+
+[[rule]]
+id = "git-worktree-add"
+tool = ["git"]
+args_start = ["worktree", "add"]
+phase = "pre"
+when = { agent = false }
+do = { warn = "create worktrees with `wt switch --create <branch>`; it fires the post-switch hooks" }
+
+[[rule]]
+id = "git-worktree-add-agent"
+tool = ["git"]
+args_start = ["worktree", "add"]
+phase = "pre"
+when = { agent = true }
+do = { warn = "create worktrees with `wt switch --create <branch>`; it fires the post-switch hooks", block = true }

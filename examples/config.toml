@@ -1,0 +1,10 @@
+use = ["devenv", "git", "wt"]
+
+# Run these tools inside the repo's devenv when you are in a devenv repo but
+# have not entered it. The tool list is yours; edit it.
+[[rule]]
+id = "devenv-launch"
+tool = ["nvim"]
+phase = "pre"
+when = { root_has = "devenv.nix", env_unset = "DEVENV_ROOT" }
+do = { wrap = ["devenv", "shell", "--no-tui", "--"] }

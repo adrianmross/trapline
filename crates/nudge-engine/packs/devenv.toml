@@ -1,5 +1,5 @@
-# devenv: no auto-activation on cd. Mark the prompt, point at `devenv shell`,
-# and run selected tools inside it when you are in a devenv repo but not in it.
+# devenv: no auto-activation on cd. Mark the prompt and point at `devenv shell`.
+# Which tools to run inside it is yours to choose; see examples/config.toml.
 
 [[rule]]
 id = "devenv-prompt-on"
@@ -18,10 +18,3 @@ id = "devenv-notfound"
 phase = "notfound"
 when = { root_has = "devenv.nix", env_unset = "DEVENV_ROOT" }
 do = { hint = "may live in this repo's devenv: run 'dev'" }
-
-[[rule]]
-id = "devenv-launch"
-tool = ["nvim"]
-phase = "pre"
-when = { root_has = "devenv.nix", env_unset = "DEVENV_ROOT" }
-do = { wrap = ["devenv", "shell", "--no-tui", "--"] }

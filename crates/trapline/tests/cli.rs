@@ -26,7 +26,7 @@ fn trapline(cfg: &PathBuf, cwd: &PathBuf, args: &[&str], env: &[(&str, &str)]) -
 
 #[test]
 fn pre_prints_prefix_until_entered() {
-    let (d, cfg) = fixture("pre", r#"use = ["devenv"]"#);
+    let (d, cfg) = fixture("pre", include_str!("../../../examples/config.toml"));
     let out = trapline(&cfg, &d, &["check", "pre", "nvim"], &[]);
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).starts_with("devenv\nshell\n"));
