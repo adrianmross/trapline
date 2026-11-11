@@ -17,7 +17,7 @@ stdout can be a handler. The types live in `trapline-core`.
 }
 ```
 
-`phase` is one of `pre`, `post`, `notfound`, `chpwd`, `prompt`. `tool` and
+`phase` is one of `pre`, `post`, `notfound`, `chpwd`, `prompt`, `session_start`. `tool` and
 `args` describe the wrapped command (`tool` is the missing name for
 `notfound`). `rc` is set for `post`.
 
@@ -47,3 +47,14 @@ stdout can be a handler. The types live in `trapline-core`.
   exit 1 blocks.
 - `json`: the decision above.
 - `shell`: `export K='V'` / `unset K` lines, for prompt markers.
+
+## Agent hooks
+
+`trapline agent claude` reads a Claude Code hook payload on stdin and prints the
+hook response on stdout (nothing when there is nothing to say; always exit 0).
+
+| Hook | Becomes | Response |
+|---|---|---|
+| `SessionStart` | one `session_start` event | `additionalContext` (and `systemMessage`) with the messages |
+| `PreToolUse`, `Bash` | one `pre` event per simple command | `block` -> `permissionDecision: "deny"` with the reason; otherwise `additionalContext` only, so the permission flow is unchanged |
+| anything else | none | no output |

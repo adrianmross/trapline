@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use trapline_core::{Decision, Event, Handler, Level, Phase};
 
+pub mod agent;
+
 const ZSH_GLUE: &str = include_str!("glue.zsh");
 
 #[derive(Parser)]
@@ -17,6 +19,11 @@ struct Cli {
 enum Cmd {
     /// Print shell glue to eval from your rc file.
     Hook { shell: String },
+    /// Answer an agent's hook call (JSON on stdin) with the same rules.
+    Agent {
+        #[arg(value_enum)]
+        name: AgentName,
+    },
     /// Evaluate the rules for one event.
     Check {
         #[arg(value_enum)]
@@ -36,12 +43,18 @@ enum Cmd {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum AgentName {
+    Claude,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum PhaseArg {
     Pre,
     Post,
     Notfound,
     Chpwd,
     Prompt,
+    SessionStart,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -124,6 +137,15 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        Cmd::Agent {
+            name: AgentName::Claude,
+        } => {
+            let stdin = std::io::read_to_string(std::io::stdin()).map_err(|e| e.to_string())?;
+            if let Some(out) = agent::run_claude(&stdin, &engine()?, std::env::vars().collect()) {
+                println!("{out}");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Cmd::Check {
             phase,
             tool,
@@ -139,6 +161,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     PhaseArg::Notfound => Phase::Notfound,
                     PhaseArg::Chpwd => Phase::Chpwd,
                     PhaseArg::Prompt => Phase::Prompt,
+                    PhaseArg::SessionStart => Phase::SessionStart,
                 },
                 tool,
                 args,

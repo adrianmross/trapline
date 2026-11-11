@@ -34,3 +34,9 @@ args_start = ["worktree", "add"]
 phase = "pre"
 when = { agent = true }
 do = { warn = "create worktrees with `wt switch --create <branch>`; it fires the post-switch hooks", block = true }
+
+[[rule]]
+id = "git-session-root-off-default"
+phase = "session_start"
+when = { git = "root_off_default" }
+do = { warn = "this is the ROOT checkout and it is on '{branch}', not '{default}'. Root checkouts stay on '{default}'; do feature work in a wt worktree (`wt switch --create <branch>`) and do not edit or commit here." }

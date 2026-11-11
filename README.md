@@ -67,7 +67,7 @@ do    = { wrap = ["devenv", "shell", "--no-tui", "--"] }
 
 (`examples/config.toml` is this file.)
 
-- **Phases:** `pre`, `post`, `notfound`, `chpwd`, `prompt`.
+- **Phases:** `pre`, `post`, `notfound`, `chpwd`, `prompt`, `session_start`.
 - **Matching:** `tool`, `sub` (the first subcommand is one of these) and
   `args_start` (the positional arguments start with these). Global flags such
   as `git -C path` are skipped.
@@ -82,6 +82,30 @@ do    = { wrap = ["devenv", "shell", "--no-tui", "--"] }
 
 See `docs/protocol.md` for the event and decision JSON that handlers speak.
 
+## Agents
+
+Agent shells often skip your rc files, so the shell glue never runs there.
+`trapline agent claude` answers Claude Code's hook calls with the same rules:
+
+```json
+{"hooks": {
+  "SessionStart": [{"hooks": [{"type": "command", "command": "trapline agent claude", "timeout": 10}]}],
+  "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "trapline agent claude", "timeout": 10}]}]
+}}
+```
+
+- **`SessionStart`** becomes a `session_start` event; messages go to the agent as
+  context (and to you as a notice).
+- **`PreToolUse` on `Bash`** is split into its simple commands (`cd x && git
+  commit` is two) and each becomes a `pre` event. A `block` denies the call and
+  the reason is shown to the agent; a `hint` or `warn` is added as context and
+  the normal permission flow continues.
+- Every event carries `AGENT=1`, so `agent = true` rules apply.
+- Use a separate config for agents so shell wrappers and agent rules stay
+  apart: `TRAPLINE_CONFIG=$HOME/.config/trapline/agent.toml trapline agent claude`.
+- Limits: the parser does not look inside `$(...)`, subshells or `cd`, so a rule
+  can miss a command hidden there. Treat it as guidance, not a sandbox.
+
 ## Packs
 
 `nudge packs` lists them and `nudge show <pack>` prints one.
@@ -90,6 +114,7 @@ See `docs/protocol.md` for the event and decision JSON that handlers speak.
 |---|---|
 | `devenv` | Prompt markers (`⬡ devenv` inside, `⬡ off` in a devenv repo you have not entered); a not-found hint pointing at `dev`. |
 | `git` | In a root checkout off the default branch, `commit`/`push`/`add`/`merge`/`rebase` warn (firmer wording for an agent) and never block. Raw `git worktree add` warns a human and blocks an agent, and points at `wt`. |
+| `devenv-agent` | Agent-only: at session start, tells the agent the repo has a devenv and how to use it. Quiet in repos without a `devenv.nix`. |
 | `wt` | `wt switch` warns when `devenv` is not on `PATH` (the post-switch warm-up would be skipped). `wt remove` reminds an agent to check unpushed work. |
 
 ## Status

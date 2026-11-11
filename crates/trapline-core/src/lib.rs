@@ -20,6 +20,8 @@ pub enum Phase {
     Chpwd,
     /// A prompt is about to render.
     Prompt,
+    /// An agent session is starting (`cwd` is the session directory).
+    SessionStart,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

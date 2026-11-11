@@ -12,6 +12,7 @@ use trapline_core::{Decision, Event, Handler, Level, Message, Phase};
 const DEVENV_PACK: &str = include_str!("../packs/devenv.toml");
 const GIT_PACK: &str = include_str!("../packs/git.toml");
 const WT_PACK: &str = include_str!("../packs/wt.toml");
+const DEVENV_AGENT_PACK: &str = include_str!("../packs/devenv-agent.toml");
 
 /// Env vars that mark the caller as an agent. `AGENT=1` is the generic switch.
 const AGENT_VARS: &[&str] = &["AGENT", "CLAUDECODE"];
@@ -22,11 +23,12 @@ pub fn builtin_pack(name: &str) -> Option<&'static str> {
         "devenv" => Some(DEVENV_PACK),
         "git" => Some(GIT_PACK),
         "wt" => Some(WT_PACK),
+        "devenv-agent" => Some(DEVENV_AGENT_PACK),
         _ => None,
     }
 }
 
-pub const BUILTIN_PACKS: &[&str] = &["devenv", "git", "wt"];
+pub const BUILTIN_PACKS: &[&str] = &["devenv", "devenv-agent", "git", "wt"];
 
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {

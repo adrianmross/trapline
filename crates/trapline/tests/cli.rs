@@ -85,3 +85,61 @@ fn hook_keeps_existing_functions_and_rejects_odd_tool_names() {
     assert!(out.contains("functions -c foo _trapline_orig_foo"), "{out}");
     assert_eq!(run("a;b").status.code(), Some(2));
 }
+
+fn agent_claude(cfg: &PathBuf, hook: &str) -> (Option<i32>, String) {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut c = Command::new(env!("CARGO_BIN_EXE_trapline"))
+        .env("TRAPLINE_CONFIG", cfg)
+        .env_remove("AGENT")
+        .env_remove("CLAUDECODE")
+        .args(["agent", "claude"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    c.stdin.take().unwrap().write_all(hook.as_bytes()).unwrap();
+    let out = c.wait_with_output().unwrap();
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
+#[test]
+fn agent_claude_denies_raw_worktree_add_inside_a_compound_command() {
+    let (d, cfg) = fixture("agent-deny", r#"use = ["git"]"#);
+    let hook = format!(
+        r#"{{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":"{}","tool_input":{{"command":"cd /tmp && git worktree add ../x"}}}}"#,
+        d.display()
+    );
+    let (code, out) = agent_claude(&cfg, &hook);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(code, Some(0));
+    assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert!(v["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap()
+        .contains("wt switch"));
+}
+
+#[test]
+fn agent_claude_session_start_adds_devenv_context_and_ignores_other_tools() {
+    let (d, cfg) = fixture("agent-ctx", r#"use = ["devenv-agent"]"#);
+    let start = format!(
+        r#"{{"hook_event_name":"SessionStart","cwd":"{}"}}"#,
+        d.display()
+    );
+    let (_, out) = agent_claude(&cfg, &start);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("devenv"));
+    let read = format!(
+        r#"{{"hook_event_name":"PreToolUse","tool_name":"Read","cwd":"{}","tool_input":{{}}}}"#,
+        d.display()
+    );
+    assert_eq!(agent_claude(&cfg, &read), (Some(0), String::new()));
+    assert_eq!(agent_claude(&cfg, "not json"), (Some(0), String::new()));
+}
