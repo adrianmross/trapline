@@ -108,6 +108,18 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             }
             print!("{ZSH_GLUE}");
             for tool in engine()?.wrapped_tools() {
+                // Tool names go into shell code; keep them to plain command names.
+                if !tool
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_.+-".contains(c))
+                {
+                    return Err(format!("cannot wrap tool with name {tool:?}"));
+                }
+                // Keep a function the tool already has, unless it is our own.
+                println!(
+                    "(( $+functions[{tool}] )) && [[ ${{functions[{tool}]}} != *_trapline_run* ]] \
+                     && functions -c {tool} _trapline_orig_{tool}"
+                );
                 println!("{tool}() {{ _trapline_run {tool} \"$@\" }}");
             }
             Ok(ExitCode::SUCCESS)

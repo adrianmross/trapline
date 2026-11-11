@@ -9,12 +9,15 @@ _trapline_chpwd() { command trapline check chpwd --format shell >/dev/null }
 add-zsh-hook chpwd _trapline_chpwd
 
 # Run a wrapped tool: ask for a prefix (e.g. `devenv shell --`), run, report.
+# A function the tool already had is kept (as _trapline_orig_<tool>) and called.
 _trapline_run() {
   local tool="$1"; shift
   local -a p
   p=("${(@f)$(command trapline check pre "$tool" -- "$@")}") || return 1
   [[ -n "${p[1]}" ]] || p=()
-  if (( ${#p} )); then "${p[@]}" "$tool" "$@"; else command "$tool" "$@"; fi
+  if (( ${#p} )); then "${p[@]}" "$tool" "$@"
+  elif (( $+functions[_trapline_orig_$tool] )); then "_trapline_orig_$tool" "$@"
+  else command "$tool" "$@"; fi
   local rc=$?
   command trapline check post "$tool" --rc $rc -- "$@" >/dev/null
   return $rc

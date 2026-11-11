@@ -67,3 +67,21 @@ fn block_exits_one_and_hook_defines_wrappers() {
         .unwrap();
     assert!(String::from_utf8_lossy(&hook.stdout).contains("rm() { _trapline_run rm"));
 }
+
+#[test]
+fn hook_keeps_existing_functions_and_rejects_odd_tool_names() {
+    let run = |tool: &str| {
+        let src =
+            format!("[[rule]]\nid=\"x\"\ntool=[\"{tool}\"]\nphase=\"pre\"\ndo={{hint=\"h\"}}\n");
+        let (_, cfg) = fixture("names", &src);
+        Command::new(env!("CARGO_BIN_EXE_trapline"))
+            .env("TRAPLINE_CONFIG", &cfg)
+            .args(["hook", "zsh"])
+            .output()
+            .unwrap()
+    };
+    let ok = run("foo");
+    let out = String::from_utf8_lossy(&ok.stdout);
+    assert!(out.contains("functions -c foo _trapline_orig_foo"), "{out}");
+    assert_eq!(run("a;b").status.code(), Some(2));
+}
