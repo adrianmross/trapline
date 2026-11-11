@@ -1,6 +1,7 @@
 # git: keep the root checkout on the default branch; make worktrees with wt.
-# Humans get a warning; agents are blocked. An agent is any caller with AGENT or
-# CLAUDECODE set in its environment.
+# A root checkout off the default branch only warns, with firmer wording for
+# agents. A raw `git worktree add` blocks agents. An agent is any caller with
+# AGENT or CLAUDECODE set in its environment.
 
 [[rule]]
 id = "git-root-off-default"
@@ -16,7 +17,7 @@ tool = ["git"]
 sub = ["commit", "push", "add", "merge", "rebase"]
 phase = "pre"
 when = { git = "root_off_default", agent = true }
-do = { warn = "root checkout is on '{branch}', not '{default}'; do not edit or commit here. Use `wt switch --create <branch>`", block = true }
+do = { warn = "root checkout is on '{branch}', not '{default}'; do not edit or commit here. Use `wt switch --create <branch>`" }
 
 [[rule]]
 id = "git-worktree-add"

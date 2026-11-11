@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn git_pack_warns_humans_and_blocks_agents_in_off_default_root() {
+    fn git_pack_warns_humans_and_agents_in_off_default_root() {
         let e = Engine::from_toml(r#"use = ["git"]"#).unwrap();
         let cwd = git_repo("off", "feat/x");
         let human = e.handle(&git_ev(&["-C", ".", "commit", "-m", "x"], &cwd, &[]));
@@ -372,7 +372,10 @@ mod tests {
             human.messages
         );
         let agent = e.handle(&git_ev(&["commit"], &cwd, &[("CLAUDECODE", "1")]));
-        assert!(!agent.proceed);
+        assert!(agent.proceed);
+        assert!(agent.messages[0]
+            .text
+            .contains("do not edit or commit here"));
         // Not a gated subcommand, and on the default branch: silent.
         assert!(e
             .handle(&git_ev(&["status"], &cwd, &[]))

@@ -89,7 +89,7 @@ See `docs/protocol.md` for the event and decision JSON that handlers speak.
 | Pack | What it does |
 |---|---|
 | `devenv` | Prompt markers (`⬡ devenv` inside, `⬡ off` in a devenv repo you have not entered); a not-found hint pointing at `dev`. |
-| `git` | In a root checkout off the default branch, `commit`/`push`/`add`/`merge`/`rebase` warn a human and block an agent. Raw `git worktree add` does the same and points at `wt`. |
+| `git` | In a root checkout off the default branch, `commit`/`push`/`add`/`merge`/`rebase` warn (firmer wording for an agent) and never block. Raw `git worktree add` warns a human and blocks an agent, and points at `wt`. |
 | `wt` | `wt switch` warns when `devenv` is not on `PATH` (the post-switch warm-up would be skipped). `wt remove` reminds an agent to check unpushed work. |
 
 ## Status
