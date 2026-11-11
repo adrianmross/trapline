@@ -79,13 +79,12 @@ pub fn events(hook: &Value, mut env: BTreeMap<String, String>) -> Option<(String
 
 /// Merge decisions for several commands: any block blocks, messages concatenate.
 pub fn merge(decisions: impl IntoIterator<Item = Decision>) -> Decision {
-    let mut out = Decision::default();
-    for d in decisions {
-        out.proceed &= d.proceed;
-        out.messages.extend(d.messages);
-        out.fired.extend(d.fired);
-    }
-    out
+    decisions
+        .into_iter()
+        .fold(Decision::default(), |mut acc, d| {
+            acc.merge(d);
+            acc
+        })
 }
 
 /// The hook's stdout JSON, or `None` when there is nothing to say.

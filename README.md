@@ -106,6 +106,29 @@ Agent shells often skip your rc files, so the shell glue never runs there.
 - Limits: the parser does not look inside `$(...)`, subshells or `cd`, so a rule
   can miss a command hidden there. Treat it as guidance, not a sandbox.
 
+## Plugins
+
+Three extension points, none of which need a change to trapline:
+
+- **Packs.** Drop `mypack.toml` in `~/.config/trapline/packs/` and `use =
+  ["mypack"]`. A user pack shadows a built-in of the same name.
+- **Handlers.** Any program that reads an Event as JSON on stdin and prints a
+  Decision as JSON (any subset of fields) on stdout:
+
+  ```toml
+  [[handler]]
+  id      = "my-check"
+  command = ["my-check", "--json"]
+  phase   = ["pre"]
+  tool    = ["kubectl"]
+  timeout_ms = 2000   # killed after this; a failing handler warns, never blocks
+  ```
+
+- **Agent adapters.** `trapline agent foo` runs `trapline-agent-foo` from `PATH`
+  (like `git foo`). The adapter translates its agent's hook payload to an Event,
+  calls `trapline eval` (Event JSON on stdin, Decision JSON on stdout), and
+  translates back. Write it in any language.
+
 ## Packs
 
 `nudge packs` lists them and `nudge show <pack>` prints one.

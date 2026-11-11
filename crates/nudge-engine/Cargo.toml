@@ -10,3 +10,4 @@ repository.workspace = true
 trapline-core.workspace = true
 serde.workspace = true
 toml.workspace = true
+serde_json.workspace = true

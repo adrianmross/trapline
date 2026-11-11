@@ -53,7 +53,9 @@ pub struct Message {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Decision {
-    /// `false` blocks the command.
+    /// `false` blocks the command. Defaults to `true` so a handler can reply
+    /// with just the fields it cares about.
+    #[serde(default = "yes")]
     pub proceed: bool,
     /// argv to run the command under (e.g. `devenv shell --no-tui --`).
     #[serde(default)]
@@ -67,6 +69,24 @@ pub struct Decision {
     /// Ids of the rules that fired, for `explain`.
     #[serde(default)]
     pub fired: Vec<String>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Decision {
+    /// Fold another decision in: any block blocks, messages and env add up, and
+    /// the first non-empty prefix wins.
+    pub fn merge(&mut self, o: Decision) {
+        self.proceed &= o.proceed;
+        if self.prefix.is_empty() {
+            self.prefix = o.prefix;
+        }
+        self.messages.extend(o.messages);
+        self.set_env.extend(o.set_env);
+        self.fired.extend(o.fired);
+    }
 }
 
 impl Default for Decision {

@@ -19,11 +19,17 @@ struct Cli {
 enum Cmd {
     /// Print shell glue to eval from your rc file.
     Hook { shell: String },
-    /// Answer an agent's hook call (JSON on stdin) with the same rules.
+    /// Answer an agent's hook call (JSON on stdin) with the same rules. `claude`
+    /// is built in; any other name runs `trapline-agent-<name>` from PATH.
     Agent {
-        #[arg(value_enum)]
-        name: AgentName,
+        name: String,
+        /// Extra arguments for an external adapter.
+        #[arg(last = true)]
+        args: Vec<String>,
     },
+    /// Evaluate one Event (JSON on stdin) and print the Decision as JSON. This
+    /// is the API an adapter written in any language calls.
+    Eval,
     /// Evaluate the rules for one event.
     Check {
         #[arg(value_enum)]
@@ -40,11 +46,6 @@ enum Cmd {
         #[arg(last = true)]
         args: Vec<String>,
     },
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum AgentName {
-    Claude,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -85,7 +86,8 @@ fn engine() -> Result<Engine, String> {
         },
         None => String::new(),
     };
-    Engine::from_toml(&src)
+    let packs = config_path().and_then(|p| p.parent().map(|d| d.join("packs")));
+    Engine::from_toml_in(&src, packs.as_deref())
 }
 
 fn shell_quote(s: &str) -> String {
@@ -137,9 +139,29 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Agent {
-            name: AgentName::Claude,
-        } => {
+        Cmd::Eval => {
+            let stdin = std::io::read_to_string(std::io::stdin()).map_err(|e| e.to_string())?;
+            let ev: Event = serde_json::from_str(&stdin).map_err(|e| format!("bad event: {e}"))?;
+            let d = engine()?.handle(&ev);
+            println!("{}", serde_json::to_string(&d).map_err(|e| e.to_string())?);
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Agent { name, args } if name != "claude" => {
+            // git-style plugin: trapline-agent-<name> on PATH owns the protocol.
+            if !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err(format!("bad agent name: {name}"));
+            }
+            let bin = format!("trapline-agent-{name}");
+            let status = std::process::Command::new(&bin)
+                .args(args)
+                .status()
+                .map_err(|e| format!("{bin}: {e} (is it on PATH?)"))?;
+            Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
+        }
+        Cmd::Agent { .. } => {
             let stdin = std::io::read_to_string(std::io::stdin()).map_err(|e| e.to_string())?;
             if let Some(out) = agent::run_claude(&stdin, &engine()?, std::env::vars().collect()) {
                 println!("{out}");

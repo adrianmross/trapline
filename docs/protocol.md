@@ -58,3 +58,10 @@ hook response on stdout (nothing when there is nothing to say; always exit 0).
 | `SessionStart` | one `session_start` event | `additionalContext` (and `systemMessage`) with the messages |
 | `PreToolUse`, `Bash` | one `pre` event per simple command | `block` -> `permissionDecision: "deny"` with the reason; otherwise `additionalContext` only, so the permission flow is unchanged |
 | anything else | none | no output |
+
+## Evaluating from your own code
+
+`trapline eval` reads one Event as JSON on stdin and prints the Decision as
+JSON. External handlers use the same two shapes in the other direction: they
+receive an Event and may reply with any subset of Decision fields (`proceed`
+defaults to true).

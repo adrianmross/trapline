@@ -6,7 +6,10 @@
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use trapline_core::{Decision, Event, Handler, Level, Message, Phase};
 
 const DEVENV_PACK: &str = include_str!("../packs/devenv.toml");
@@ -37,6 +40,29 @@ pub struct Config {
     pub packs: Vec<String>,
     #[serde(default)]
     pub rule: Vec<Rule>,
+    /// External handlers: any program that reads an Event as JSON on stdin and
+    /// prints a Decision as JSON on stdout.
+    #[serde(default)]
+    pub handler: Vec<HandlerCfg>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HandlerCfg {
+    pub id: String,
+    /// argv; the first element is the program.
+    pub command: Vec<String>,
+    /// Only called for these phases / tools (empty = all).
+    #[serde(default)]
+    pub phase: Vec<Phase>,
+    #[serde(default)]
+    pub tool: Vec<String>,
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+/// Generous: macOS scans a never-run executable on its first exec (~1s).
+fn default_timeout_ms() -> u64 {
+    2000
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,29 +119,61 @@ pub struct Action {
 
 pub struct Engine {
     rules: Vec<Rule>,
+    handlers: Vec<HandlerCfg>,
 }
 
 impl Engine {
-    /// Parse a config and expand its `use = [...]` packs. Unknown packs error.
+    /// Parse a config and expand its `use = [...]` packs from the built-ins.
     pub fn from_toml(src: &str) -> Result<Engine, String> {
+        Self::from_toml_in(src, None)
+    }
+
+    /// Like [`Engine::from_toml`], but a pack named `x` is read from
+    /// `<pack_dir>/x.toml` first, so anyone can add packs without a PR.
+    pub fn from_toml_in(src: &str, pack_dir: Option<&Path>) -> Result<Engine, String> {
         let cfg: Config = toml::from_str(src).map_err(|e| e.to_string())?;
         let mut rules = vec![];
+        let mut handlers = vec![];
         for name in &cfg.packs {
-            let pack = builtin_pack(name).ok_or_else(|| format!("unknown pack: {name}"))?;
-            let p: Config = toml::from_str(pack).map_err(|e| format!("pack {name}: {e}"))?;
+            if !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err(format!("bad pack name: {name}"));
+            }
+            let user =
+                pack_dir.and_then(|d| fs::read_to_string(d.join(format!("{name}.toml"))).ok());
+            let src = match (&user, builtin_pack(name)) {
+                (Some(u), _) => u.as_str(),
+                (None, Some(b)) => b,
+                (None, None) => return Err(format!("unknown pack: {name}")),
+            };
+            let p: Config = toml::from_str(src).map_err(|e| format!("pack {name}: {e}"))?;
             rules.extend(p.rule);
+            handlers.extend(p.handler);
         }
         rules.extend(cfg.rule);
-        Ok(Engine { rules })
+        handlers.extend(cfg.handler);
+        Ok(Engine { rules, handlers })
     }
 
     /// Tools with `pre`/`post` rules: the shell glue defines wrappers for these.
     pub fn wrapped_tools(&self) -> BTreeSet<&str> {
-        self.rules
+        let rules = self
+            .rules
             .iter()
             .filter(|r| matches!(r.phase, Phase::Pre | Phase::Post))
-            .flat_map(|r| r.tool.iter().map(String::as_str))
-            .collect()
+            .flat_map(|r| r.tool.iter().map(String::as_str));
+        let handlers = self
+            .handlers
+            .iter()
+            .filter(|h| {
+                h.phase
+                    .iter()
+                    .any(|p| matches!(p, Phase::Pre | Phase::Post))
+            })
+            .flat_map(|h| h.tool.iter().map(String::as_str));
+        rules.chain(handlers).collect()
     }
 
     fn applies(rule: &Rule, ev: &Event) -> bool {
@@ -287,8 +345,55 @@ impl Handler for Engine {
                 d.set_env.insert(k.clone(), Some(v.clone()));
             }
         }
+        for h in self.handlers.iter().filter(|h| {
+            (h.phase.is_empty() || h.phase.contains(&ev.phase))
+                && (h.tool.is_empty() || ev.tool.as_ref().is_some_and(|t| h.tool.contains(t)))
+        }) {
+            match run_handler(h, ev) {
+                Ok(mut out) => {
+                    out.fired.push(format!("handler:{}", h.id));
+                    d.merge(out);
+                }
+                // A broken plugin must never block the user's command.
+                Err(e) => d.messages.push(Message {
+                    level: Level::Warn,
+                    text: format!("handler {} failed: {e}", h.id),
+                }),
+            }
+        }
         d
     }
+}
+
+/// Run an external handler: Event JSON on stdin, Decision JSON on stdout,
+/// killed after `timeout_ms`.
+fn run_handler(h: &HandlerCfg, ev: &Event) -> Result<Decision, String> {
+    let (prog, args) = h.command.split_first().ok_or("empty command")?;
+    let mut child = Command::new(prog)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("{prog}: {e}"))?;
+    let payload = serde_json::to_vec(ev).map_err(|e| e.to_string())?;
+    // A handler that exits without reading is fine; ignore the broken pipe.
+    let _ = child.stdin.take().ok_or("no stdin")?.write_all(&payload);
+    let deadline = Instant::now() + Duration::from_millis(h.timeout_ms);
+    loop {
+        match child.try_wait().map_err(|e| e.to_string())? {
+            Some(status) if !status.success() => return Err(format!("exited with {status}")),
+            Some(_) => break,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("timed out after {}ms", h.timeout_ms));
+            }
+            None => std::thread::sleep(Duration::from_millis(2)),
+        }
+    }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("bad decision JSON: {e}"))
 }
 
 #[cfg(test)]
@@ -422,6 +527,81 @@ mod tests {
         fs::write(bin.join("devenv"), "").unwrap();
         ev.env.insert("PATH".into(), bin.to_string_lossy().into());
         assert!(e.handle(&ev).fired.is_empty());
+    }
+
+    fn script(name: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("nudge-h-{name}-{}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        let p = d.join("h.sh");
+        fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    #[test]
+    fn external_handler_merges_and_a_bad_one_never_blocks() {
+        let ok = script(
+            "ok",
+            r#"cat >/dev/null; echo '{"messages":[{"level":"hint","text":"from plugin"}],"proceed":false}'"#,
+        );
+        let bad = script("bad", "echo not-json");
+        let cfg = format!(
+            "[[handler]]\nid=\"ok\"\ncommand=[\"{}\"]\nphase=[\"pre\"]\ntool=[\"x\"]\ntimeout_ms=20000\n\
+             [[handler]]\nid=\"bad\"\ncommand=[\"{}\"]\ntimeout_ms=20000\n",
+            ok.display(),
+            bad.display()
+        );
+        let e = Engine::from_toml(&cfg).unwrap();
+        assert_eq!(e.wrapped_tools().into_iter().collect::<Vec<_>>(), ["x"]);
+        let d = e.handle(&ev(Phase::Pre, Some("x"), Path::new("/"), &[]));
+        assert!(
+            !d.proceed,
+            "ok handler block should apply: {:?}",
+            d.messages
+        );
+        let texts: Vec<_> = d.messages.iter().map(|m| m.text.as_str()).collect();
+        assert!(texts.contains(&"from plugin"));
+        assert!(texts
+            .iter()
+            .any(|t| t.contains("handler bad failed: bad decision JSON")));
+        assert!(d.fired.contains(&"handler:ok".to_string()));
+    }
+
+    #[test]
+    fn a_slow_handler_is_killed_at_its_timeout() {
+        let slow = script("slow", "sleep 30");
+        let cfg = format!(
+            "[[handler]]\nid=\"slow\"\ncommand=[\"{}\"]\ntimeout_ms=100\n",
+            slow.display()
+        );
+        let e = Engine::from_toml(&cfg).unwrap();
+        let t = Instant::now();
+        let d = e.handle(&ev(Phase::Pre, Some("x"), Path::new("/"), &[]));
+        assert!(t.elapsed() < Duration::from_secs(10), "not killed");
+        assert!(d.proceed);
+        assert!(d.messages[0]
+            .text
+            .contains("handler slow failed: timed out after 100ms"));
+    }
+
+    #[test]
+    fn user_pack_dir_wins_and_names_are_checked() {
+        let dir = std::env::temp_dir().join(format!("nudge-packs-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("mine.toml"),
+            "[[rule]]\nid=\"m\"\ntool=[\"t\"]\nphase=\"pre\"\ndo={hint=\"mine\"}\n",
+        )
+        .unwrap();
+        let e = Engine::from_toml_in(r#"use = ["mine"]"#, Some(&dir)).unwrap();
+        assert_eq!(
+            e.handle(&ev(Phase::Pre, Some("t"), Path::new("/"), &[]))
+                .fired,
+            ["m"]
+        );
+        assert!(Engine::from_toml_in(r#"use = ["../etc"]"#, Some(&dir)).is_err());
+        assert!(Engine::from_toml_in(r#"use = ["missing"]"#, Some(&dir)).is_err());
     }
 
     #[test]

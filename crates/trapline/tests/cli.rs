@@ -143,3 +143,37 @@ fn agent_claude_session_start_adds_devenv_context_and_ignores_other_tools() {
     assert_eq!(agent_claude(&cfg, &read), (Some(0), String::new()));
     assert_eq!(agent_claude(&cfg, "not json"), (Some(0), String::new()));
 }
+
+#[test]
+fn eval_reads_an_event_and_external_agent_adapters_dispatch_from_path() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+    let (d, cfg) = fixture("eval", r#"use = ["git"]"#);
+    let ev = r#"{"phase":"pre","tool":"git","args":["worktree","add","x"],"cwd":"/","env":{"AGENT":"1"}}"#;
+    let mut c = Command::new(env!("CARGO_BIN_EXE_trapline"))
+        .env("TRAPLINE_CONFIG", &cfg)
+        .arg("eval")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    c.stdin.take().unwrap().write_all(ev.as_bytes()).unwrap();
+    let out = c.wait_with_output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["proceed"], false);
+
+    let bin = d.join("trapline-agent-demo");
+    fs::write(&bin, "#!/bin/sh\necho adapter-ran $1\nexit 7\n").unwrap();
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_trapline"))
+        .env("PATH", format!("{}:/usr/bin:/bin", d.display()))
+        .args(["agent", "demo", "--", "arg1"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(7));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "adapter-ran arg1"
+    );
+}
