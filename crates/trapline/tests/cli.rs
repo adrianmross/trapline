@@ -324,3 +324,25 @@ fn sandbox_profile_denies_the_root_checkout_and_really_enforces_on_macos() {
         ".git must stay writable"
     );
 }
+
+#[test]
+fn run_points_the_command_at_the_named_profile() {
+    let (d, _) = fixture("run", "");
+    let out = Command::new(env!("CARGO_BIN_EXE_trapline"))
+        .env_remove("TRAPLINE_CONFIG")
+        .env("XDG_CONFIG_HOME", &d)
+        .args(["run", "--profile", "agent", "--no-sandbox", "--"])
+        .args(["sh", "-c", "printf %s \"$TRAPLINE_CONFIG\""])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        d.join("trapline/agent.toml").to_string_lossy()
+    );
+    let bad = Command::new(env!("CARGO_BIN_EXE_trapline"))
+        .args(["run", "--profile", "../x", "--", "true"])
+        .output()
+        .unwrap();
+    assert!(!bad.status.success());
+}

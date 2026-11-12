@@ -37,9 +37,16 @@ _trapline_wrap_cnf() {
   else
     _trapline_orig_cnf() { print -u2 "zsh: command not found: $1"; return 127 }
   fi
+  # Guard the helpers: a shell snapshot (Claude Code) can keep this handler but
+  # drop the underscore-prefixed functions, and an unguarded call would re-enter
+  # the handler forever.
   command_not_found_handler() {
-    _trapline_notfound_hint "$1"
-    _trapline_orig_cnf "$@"
+    (( $+functions[_trapline_notfound_hint] )) && _trapline_notfound_hint "$1"
+    if (( $+functions[_trapline_orig_cnf] )); then
+      _trapline_orig_cnf "$@"
+    else
+      print -u2 "zsh: command not found: $1"; return 127
+    fi
   }
 }
 _trapline_wrap_cnf
