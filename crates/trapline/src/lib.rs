@@ -56,6 +56,23 @@ enum Cmd {
     /// Evaluate one Event (JSON on stdin) and print the Decision as JSON. This
     /// is the API an adapter written in any language calls.
     Eval,
+    /// Show, for each rule in the event's phase, whether it fired and why not.
+    Explain {
+        #[arg(value_enum)]
+        phase: PhaseArg,
+        tool: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+    /// Show recent rule firings, or with `--stats` how often each rule fired.
+    Log {
+        #[arg(short, default_value_t = 20)]
+        n: usize,
+        #[arg(long)]
+        stats: bool,
+    },
     /// Evaluate the rules for one event.
     Check {
         #[arg(value_enum)]
@@ -213,6 +230,117 @@ fn launch(profile: Option<String>, no_sandbox: bool, cmd: Vec<String>) -> Result
     Err(format!("{}: {err}", argv[0]))
 }
 
+fn cli_event(
+    phase: PhaseArg,
+    tool: Option<String>,
+    args: Vec<String>,
+    cwd: Option<PathBuf>,
+    rc: Option<i32>,
+) -> Result<Event, String> {
+    Ok(Event {
+        phase: match phase {
+            PhaseArg::Pre => Phase::Pre,
+            PhaseArg::Post => Phase::Post,
+            PhaseArg::Notfound => Phase::Notfound,
+            PhaseArg::Chpwd => Phase::Chpwd,
+            PhaseArg::Prompt => Phase::Prompt,
+            PhaseArg::SessionStart => Phase::SessionStart,
+        },
+        tool,
+        args,
+        cwd: cwd.map_or_else(|| std::env::current_dir().map_err(|e| e.to_string()), Ok)?,
+        env: std::env::vars().collect(),
+        rc,
+    })
+}
+
+/// `$XDG_STATE_HOME/trapline/fired.jsonl`, one line per event that fired a rule.
+fn log_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))?;
+    Some(base.join("trapline/fired.jsonl"))
+}
+
+/// Best-effort: a log that cannot be written must never affect the command.
+/// Rules compiled into the shell glue do not pass through here.
+fn record(ev: &Event, d: &Decision) {
+    use std::io::Write;
+    if d.fired.is_empty() {
+        return;
+    }
+    let Some(p) = log_path() else { return };
+    let _ = std::fs::create_dir_all(p.parent().unwrap());
+    // ponytail: unbounded append; add rotation if the file ever gets large.
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |t| t.as_secs());
+    let line = serde_json::json!({
+        "ts": ts, "phase": ev.phase, "tool": ev.tool, "cwd": ev.cwd,
+        "fired": d.fired, "proceed": d.proceed,
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(p)
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// Records every decision it hands back.
+struct Logged(Engine);
+
+impl Handler for Logged {
+    fn handle(&self, ev: &Event) -> Decision {
+        let d = self.0.handle(ev);
+        record(ev, &d);
+        d
+    }
+}
+
+fn show_log(n: usize, stats: bool) -> Result<ExitCode, String> {
+    let text = log_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    let rows: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    if stats {
+        let mut counts = std::collections::BTreeMap::<String, usize>::new();
+        for r in &rows {
+            for id in r["fired"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str())
+            {
+                *counts.entry(id.to_string()).or_default() += 1;
+            }
+        }
+        let mut v: Vec<_> = counts.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        v.iter().for_each(|(id, c)| println!("{c:>6}  {id}"));
+    } else {
+        for r in rows.iter().rev().take(n).rev() {
+            println!(
+                "{}  {:<12} {:<10} {}{}",
+                r["ts"],
+                r["phase"].as_str().unwrap_or(""),
+                r["tool"].as_str().unwrap_or("-"),
+                r["fired"],
+                if r["proceed"] == false {
+                    "  BLOCKED"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 fn config_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("TRAPLINE_CONFIG") {
         return Some(p.into());
@@ -302,7 +430,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         Cmd::Eval => {
             let stdin = std::io::read_to_string(std::io::stdin()).map_err(|e| e.to_string())?;
             let ev: Event = serde_json::from_str(&stdin).map_err(|e| format!("bad event: {e}"))?;
-            let d = engine()?.handle(&ev);
+            let d = Logged(engine()?).handle(&ev);
             println!("{}", serde_json::to_string(&d).map_err(|e| e.to_string())?);
             Ok(ExitCode::SUCCESS)
         }
@@ -323,11 +451,33 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         }
         Cmd::Agent { .. } => {
             let stdin = std::io::read_to_string(std::io::stdin()).map_err(|e| e.to_string())?;
-            if let Some(out) = agent::run_claude(&stdin, &engine()?, std::env::vars().collect()) {
+            if let Some(out) =
+                agent::run_claude(&stdin, &Logged(engine()?), std::env::vars().collect())
+            {
                 println!("{out}");
             }
             Ok(ExitCode::SUCCESS)
         }
+        Cmd::Explain {
+            phase,
+            tool,
+            cwd,
+            args,
+        } => {
+            let ev = cli_event(phase, tool, args, cwd, None)?;
+            let rows = engine()?.explain(&ev);
+            if rows.is_empty() {
+                println!("no rules in this phase");
+            }
+            for (id, why) in rows {
+                match why {
+                    None => println!("fired    {id}"),
+                    Some(w) => println!("skipped  {id}: {w}"),
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Log { n, stats } => show_log(n, stats),
         Cmd::Check {
             phase,
             tool,
@@ -336,22 +486,9 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             format,
             args,
         } => {
-            let ev = Event {
-                phase: match phase {
-                    PhaseArg::Pre => Phase::Pre,
-                    PhaseArg::Post => Phase::Post,
-                    PhaseArg::Notfound => Phase::Notfound,
-                    PhaseArg::Chpwd => Phase::Chpwd,
-                    PhaseArg::Prompt => Phase::Prompt,
-                    PhaseArg::SessionStart => Phase::SessionStart,
-                },
-                tool,
-                args,
-                cwd: cwd.map_or_else(|| std::env::current_dir().map_err(|e| e.to_string()), Ok)?,
-                env: std::env::vars().collect(),
-                rc,
-            };
+            let ev = cli_event(phase, tool, args, cwd, rc)?;
             let d = engine()?.handle(&ev);
+            record(&ev, &d);
             match format {
                 Format::Json => {
                     println!("{}", serde_json::to_string(&d).map_err(|e| e.to_string())?)

@@ -189,37 +189,80 @@ impl Engine {
         rules.chain(handlers).collect()
     }
 
-    fn applies(rule: &Rule, ev: &Event) -> bool {
+    /// Why a rule does not apply to this event, or `None` if it does.
+    fn miss(rule: &Rule, ev: &Event) -> Option<String> {
         if rule.phase != ev.phase {
-            return false;
+            return Some("phase differs".into());
         }
         if !rule.tool.is_empty() && !ev.tool.as_ref().is_some_and(|t| rule.tool.contains(t)) {
-            return false;
+            return Some(format!("tool is not one of {:?}", rule.tool));
         }
         let pos = positional(&ev.args);
         if !rule.sub.is_empty() && !pos.first().is_some_and(|a| rule.sub.contains(a)) {
-            return false;
+            return Some(format!("subcommand is not one of {:?}", rule.sub));
         }
         if !rule.args_start.is_empty() && !pos.starts_with(&rule.args_start) {
-            return false;
+            return Some(format!("arguments do not start with {:?}", rule.args_start));
         }
         let w = &rule.when;
-        w.root_has.as_deref().is_none_or(|f| root_has(&ev.cwd, f))
-            && w.env_set.as_deref().is_none_or(|k| ev.env.contains_key(k))
-            && w.env_unset
-                .as_deref()
-                .is_none_or(|k| !ev.env.contains_key(k))
-            && w.agent.is_none_or(|a| a == is_agent(&ev.env))
-            && w.command_missing
-                .as_deref()
-                .is_none_or(|c| !on_path(&ev.env, c))
-            && w.git.is_none_or(|g| match g {
-                GitCond::RootOffDefault => {
-                    git_info(&ev.cwd).is_some_and(|i| i.root_checkout && i.branch != i.default)
-                }
-                GitCond::InRepo => repo(&ev.cwd).is_some(),
-                GitCond::LinkedWorktree => repo(&ev.cwd).is_some_and(|r| !r.root_checkout),
-            })
+        let checks: [(bool, String); 6] = [
+            (
+                w.root_has.as_deref().is_none_or(|f| root_has(&ev.cwd, f)),
+                format!("no {} at or above cwd", w.root_has.as_deref().unwrap_or("")),
+            ),
+            (
+                w.env_set.as_deref().is_none_or(|k| ev.env.contains_key(k)),
+                format!("{} is not set", w.env_set.as_deref().unwrap_or("")),
+            ),
+            (
+                w.env_unset
+                    .as_deref()
+                    .is_none_or(|k| !ev.env.contains_key(k)),
+                format!("{} is set", w.env_unset.as_deref().unwrap_or("")),
+            ),
+            (
+                w.agent.is_none_or(|a| a == is_agent(&ev.env)),
+                format!(
+                    "caller {} an agent",
+                    if w.agent == Some(true) {
+                        "is not"
+                    } else {
+                        "is"
+                    }
+                ),
+            ),
+            (
+                w.command_missing
+                    .as_deref()
+                    .is_none_or(|c| !on_path(&ev.env, c)),
+                format!("{} is on PATH", w.command_missing.as_deref().unwrap_or("")),
+            ),
+            (
+                w.git.is_none_or(|g| match g {
+                    GitCond::RootOffDefault => {
+                        git_info(&ev.cwd).is_some_and(|i| i.root_checkout && i.branch != i.default)
+                    }
+                    GitCond::InRepo => repo(&ev.cwd).is_some(),
+                    GitCond::LinkedWorktree => repo(&ev.cwd).is_some_and(|r| !r.root_checkout),
+                }),
+                format!("git state is not {:?}", w.git),
+            ),
+        ];
+        checks.into_iter().find(|(ok, _)| !ok).map(|(_, why)| why)
+    }
+
+    fn applies(rule: &Rule, ev: &Event) -> bool {
+        Self::miss(rule, ev).is_none()
+    }
+
+    /// For each rule in the event's phase: its id, and why it did not apply
+    /// (`None` = it fired).
+    pub fn explain(&self, ev: &Event) -> Vec<(String, Option<String>)> {
+        self.rules
+            .iter()
+            .filter(|r| r.phase == ev.phase)
+            .map(|r| (r.id.clone(), Self::miss(r, ev)))
+            .collect()
     }
 }
 

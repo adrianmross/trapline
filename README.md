@@ -185,3 +185,11 @@ editor plugin.
 ## License
 
 MIT or Apache-2.0, at your option.
+
+## Explaining and logging
+`trapline explain <phase> [tool]` lists each rule in that phase and why it did or
+did not apply to the current directory and environment. Rules that fire through
+the binary or an agent hook are appended to `$XDG_STATE_HOME/trapline/fired.jsonl`
+(`~/.local/state` by default); read it with `trapline log [-n 20]` or
+`trapline log --stats`. Rules compiled into the shell glue spawn nothing, so they
+are not logged.

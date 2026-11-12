@@ -15,6 +15,7 @@ fn trapline(cfg: &PathBuf, cwd: &PathBuf, args: &[&str], env: &[(&str, &str)]) -
     let mut c = Command::new(env!("CARGO_BIN_EXE_trapline"));
     c.env_remove("DEVENV_ROOT")
         .env("TRAPLINE_CONFIG", cfg)
+        .env("XDG_STATE_HOME", cwd.join("state"))
         .args(args)
         .arg("--cwd")
         .arg(cwd);
@@ -345,4 +346,32 @@ fn run_points_the_command_at_the_named_profile() {
         .output()
         .unwrap();
     assert!(!bad.status.success());
+}
+
+#[test]
+fn explain_says_why_and_log_remembers_what_fired() {
+    let (d, cfg) = fixture("explain", include_str!("../../../examples/config.toml"));
+    let out = trapline(&cfg, &d, &["explain", "pre", "nvim"], &[]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("fired"), "{text}");
+    let inside = trapline(
+        &cfg,
+        &d,
+        &["explain", "pre", "nvim"],
+        &[("DEVENV_ROOT", "/x")],
+    );
+    assert!(String::from_utf8_lossy(&inside.stdout).contains("skipped"));
+
+    trapline(&cfg, &d, &["check", "pre", "nvim"], &[]);
+    let state = d.join("state");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_trapline"))
+            .env("XDG_STATE_HOME", &state)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let stats = String::from_utf8_lossy(&run(&["log", "--stats"]).stdout).into_owned();
+    assert!(stats.trim_start().starts_with('1'), "{stats}");
+    assert!(String::from_utf8_lossy(&run(&["log"]).stdout).contains("pre"));
 }
