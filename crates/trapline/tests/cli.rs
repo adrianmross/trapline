@@ -380,7 +380,7 @@ fn explain_says_why_and_log_remembers_what_fired() {
 /// report its status, prefix and messages.
 fn pre_scenario(cfg: &Path, cwd: &Path, compile: bool, agent: bool, argv: &str) -> String {
     let script = format!(
-        "eval \"$({bin} hook zsh {flag})\"; cd {cwd}; local -a _tl_prefix; \
+        "eval \"$({bin} hook zsh {flag})\"; cd '{cwd}' || exit 9; local -a _tl_prefix; \
          _trapline_pre {argv}; print \"rc=$? prefix=(${{_tl_prefix}})\"",
         bin = env!("CARGO_BIN_EXE_trapline"),
         flag = if compile { "" } else { "--no-compile" },
@@ -464,7 +464,18 @@ do = { wrap = ["devenv", "shell", "--no-tui", "--"] }
     let plain = cfg_dir.join("plain");
     fs::create_dir_all(&plain).unwrap();
 
-    for cwd in [&on_main, &off_main, &linked, &plain] {
+    // Shapes where the zsh and Rust `.git` readers are most likely to differ.
+    let detached = git_repo("pre-detached");
+    git(&detached, &["checkout", "-q", "--detach"]);
+    let packed = git_repo("pre-packed");
+    git(&packed, &["checkout", "-q", "-b", "feat/z"]);
+    git(&packed, &["pack-refs", "--all"]);
+    let spaced = git_repo("pre-sp ace");
+    git(&spaced, &["checkout", "-q", "-b", "feat/s"]);
+
+    for cwd in [
+        &on_main, &off_main, &linked, &plain, &detached, &packed, &spaced,
+    ] {
         for agent in [false, true] {
             for argv in [
                 "git commit -m x",
