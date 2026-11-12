@@ -11,18 +11,27 @@ _trapline_chpwd() { command trapline check chpwd --format shell >/dev/null }
 _trapline_notfound_hint() { command trapline check notfound "$1" >/dev/null }
 add-zsh-hook chpwd _trapline_chpwd
 
+# Pre/post default to calling the binary; `trapline hook zsh` appends compiled
+# versions (pure zsh) when every rule can be compiled. `_trapline_pre` sets
+# `_tl_prefix` (argv to run the tool under) and returns 1 to block.
+_trapline_pre() {
+  local tool="$1"; shift
+  _tl_prefix=("${(@f)$(command trapline check pre "$tool" -- "$@")}") || return 1
+  [[ -n "${_tl_prefix[1]}" ]] || _tl_prefix=()
+}
+_trapline_post() { command trapline check post "$1" --rc "$2" -- "${@:3}" >/dev/null }
+
 # Run a wrapped tool: ask for a prefix (e.g. `devenv shell --`), run, report.
 # A function the tool already had is kept (as _trapline_orig_<tool>) and called.
 _trapline_run() {
   local tool="$1"; shift
-  local -a p
-  p=("${(@f)$(command trapline check pre "$tool" -- "$@")}") || return 1
-  [[ -n "${p[1]}" ]] || p=()
-  if (( ${#p} )); then "${p[@]}" "$tool" "$@"
+  local -a _tl_prefix
+  _trapline_pre "$tool" "$@" || return 1
+  if (( ${#_tl_prefix} )); then "${_tl_prefix[@]}" "$tool" "$@"
   elif (( $+functions[_trapline_orig_$tool] )); then "_trapline_orig_$tool" "$@"
   else command "$tool" "$@"; fi
   local rc=$?
-  command trapline check post "$tool" --rc $rc -- "$@" >/dev/null
+  _trapline_post "$tool" $rc "$@"
   return $rc
 }
 

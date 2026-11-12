@@ -375,3 +375,118 @@ fn explain_says_why_and_log_remembers_what_fired() {
     assert!(stats.trim_start().starts_with('1'), "{stats}");
     assert!(String::from_utf8_lossy(&run(&["log"]).stdout).contains("pre"));
 }
+
+/// Run `_trapline_pre` in zsh (compiled or via the binary) for one command and
+/// report its status, prefix and messages.
+fn pre_scenario(cfg: &Path, cwd: &Path, compile: bool, agent: bool, argv: &str) -> String {
+    let script = format!(
+        "eval \"$({bin} hook zsh {flag})\"; cd {cwd}; local -a _tl_prefix; \
+         _trapline_pre {argv}; print \"rc=$? prefix=(${{_tl_prefix}})\"",
+        bin = env!("CARGO_BIN_EXE_trapline"),
+        flag = if compile { "" } else { "--no-compile" },
+        cwd = cwd.display(),
+    );
+    let mut c = Command::new("zsh");
+    c.args(["-f", "-c", &script])
+        .env("TRAPLINE_CONFIG", cfg)
+        .env("XDG_STATE_HOME", cwd.join("state"))
+        .env_remove("AGENT")
+        .env_remove("CLAUDECODE")
+        .env_remove("DEVENV_ROOT")
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                Path::new(env!("CARGO_BIN_EXE_trapline"))
+                    .parent()
+                    .unwrap()
+                    .display(),
+                std::env::var("PATH").unwrap()
+            ),
+        );
+    if agent {
+        c.env("CLAUDECODE", "1");
+    }
+    let out = c.output().unwrap();
+    String::from_utf8_lossy(&[out.stdout, out.stderr].concat()).into_owned()
+}
+
+#[test]
+fn compiled_pre_matches_the_binary_across_repo_states() {
+    if !have("zsh") || !have("git") {
+        return;
+    }
+    let cfg_dir = std::env::temp_dir().join(format!("trapline-pre-{}", std::process::id()));
+    fs::create_dir_all(&cfg_dir).unwrap();
+    let cfg = cfg_dir.join("config.toml");
+    fs::write(
+        &cfg,
+        r#"use = ["git", "wt"]
+[[rule]]
+id = "nvim"
+tool = ["nvim"]
+phase = "pre"
+when = { root_has = "devenv.nix", env_unset = "DEVENV_ROOT" }
+do = { wrap = ["devenv", "shell", "--no-tui", "--"] }
+"#,
+    )
+    .unwrap();
+
+    let on_main = git_repo("pre-main");
+    fs::write(on_main.join("devenv.nix"), "").unwrap();
+    let off_main = git_repo("pre-feat");
+    let git = |d: &Path, a: &[&str]| {
+        assert!(Command::new("git")
+            .args(a)
+            .current_dir(d)
+            .status()
+            .unwrap()
+            .success())
+    };
+    git(&off_main, &["checkout", "-q", "-b", "feat/x"]);
+    let linked = off_main.with_file_name(format!(
+        "{}-wt",
+        off_main.file_name().unwrap().to_string_lossy()
+    ));
+    git(&off_main, &["checkout", "-q", "main"]);
+    git(
+        &off_main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            linked.to_str().unwrap(),
+            "-b",
+            "feat/y",
+        ],
+    );
+    git(&off_main, &["checkout", "-q", "feat/x"]);
+    let plain = cfg_dir.join("plain");
+    fs::create_dir_all(&plain).unwrap();
+
+    for cwd in [&on_main, &off_main, &linked, &plain] {
+        for agent in [false, true] {
+            for argv in [
+                "git commit -m x",
+                "git -C /tmp commit -m x",
+                "git status",
+                "git worktree add ../x",
+                "wt switch --create y",
+                "wt remove y",
+                "nvim file",
+                "ls",
+            ] {
+                let a = pre_scenario(&cfg, cwd, true, agent, argv);
+                let b = pre_scenario(&cfg, cwd, false, agent, argv);
+                assert_eq!(a, b, "cwd={} agent={agent} argv={argv}", cwd.display());
+            }
+        }
+    }
+    // The comparison must have exercised a firing rule, not only silence.
+    let hit = pre_scenario(&cfg, &off_main, true, true, "git commit -m x");
+    assert!(
+        hit.contains("root checkout is on 'feat/x', not 'main'"),
+        "{hit}"
+    );
+    assert!(pre_scenario(&cfg, &on_main, true, true, "git worktree add x").contains("rc=1"));
+}

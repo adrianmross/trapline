@@ -193,3 +193,12 @@ the binary or an agent hook are appended to `$XDG_STATE_HOME/trapline/fired.json
 (`~/.local/state` by default); read it with `trapline log [-n 20]` or
 `trapline log --stats`. Rules compiled into the shell glue spawn nothing, so they
 are not logged.
+
+## Cost
+The release binary is under 1 MB (LTO, stripped, size-optimized). In zsh the
+prompt, `chpwd`, not-found, and `pre` phases compile to plain functions when
+every rule in them can be expressed in zsh, including reading branch state from
+`.git` with builtins: a wrapped `git` call costs ~0.1 ms instead of ~7 ms. The
+`post` phase costs nothing unless a rule uses it. A phase with an external
+handler, or a rule zsh cannot express, keeps calling the binary
+(`trapline hook zsh --no-compile` forces that everywhere).

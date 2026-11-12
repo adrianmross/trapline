@@ -21,6 +21,45 @@ const DEVENV_AGENT_PACK: &str = include_str!("../packs/devenv-agent.toml");
 const AGENT_VARS: &[&str] = &["AGENT", "CLAUDECODE"];
 
 /// Built-in packs by name.
+/// zsh twin of `repo()`/`git_info()`: reads `.git` with builtins only. Sets
+/// `_tl_root _tl_main _tl_rootco` and, when readable, `_tl_branch _tl_default`
+/// in the caller's scope; returns 1 outside a repo.
+const ZSH_GIT: &str = r#"_trapline_git() {
+  local d=$PWD g h c x
+  while :; do [[ -e $d/.git ]] && break; [[ $d == / ]] && return 1; d=${d:h}; done
+  _tl_root=$d
+  if [[ -d $d/.git ]]; then g=$d/.git; _tl_rootco=1
+  else
+    h=$(<$d/.git) 2>/dev/null || return 1
+    [[ $h == gitdir:* ]] || return 1
+    h=${${h#gitdir:}## #}; h=${h%%[[:space:]]#}
+    [[ $h == /* ]] && g=$h || g=$d/$h
+    _tl_rootco=0
+  fi
+  c=$g
+  [[ -r $g/commondir ]] && { c=$(<$g/commondir); c=${c%%[[:space:]]#}; [[ $c == /* ]] || c=$g/$c }
+  c=${c:A}
+  [[ $_tl_rootco == 1 ]] && _tl_main=$d || _tl_main=${c:h}
+  _tl_branch= _tl_default=
+  h=$(<$g/HEAD) 2>/dev/null || return 0
+  h=${h%%[[:space:]]#}
+  [[ $h == "ref: refs/heads/"* ]] || return 0
+  _tl_branch=${h#ref: refs/heads/}
+  if [[ -r $c/refs/remotes/origin/HEAD ]]; then
+    h=$(<$c/refs/remotes/origin/HEAD); h=${h%%[[:space:]]#}
+    [[ $h == "ref: refs/remotes/origin/"* ]] && _tl_default=${h#ref: refs/remotes/origin/}
+  fi
+  if [[ -z $_tl_default ]]; then
+    h=; [[ -r $c/packed-refs ]] && h=$(<$c/packed-refs)
+    for x in main master; do
+      if [[ -e $c/refs/heads/$x || $h == *" refs/heads/$x"* ]]; then _tl_default=$x; break; fi
+    done
+  fi
+  [[ -n $_tl_default ]] || _tl_branch=
+  return 0
+}
+"#;
+
 pub fn builtin_pack(name: &str) -> Option<&'static str> {
     match name {
         "devenv" => Some(DEVENV_PACK),
@@ -420,6 +459,18 @@ impl Engine {
             .collect::<Vec<_>>()
             .join(" || ");
         out.push_str(&format!("_trapline_is_agent() {{ [[ {agent} ]] }}\n"));
+        if let Some(body) = self.compile_pre() {
+            out.push_str(ZSH_GIT);
+            out.push_str(&format!("_trapline_pre() {{\n{body}}}\n"));
+        }
+        let has_post = self.rules.iter().any(|r| r.phase == Phase::Post)
+            || self
+                .handlers
+                .iter()
+                .any(|h| h.phase.is_empty() || h.phase.contains(&Phase::Post));
+        if !has_post {
+            out.push_str("_trapline_post() { :; }\n");
+        }
         for (phase, name) in [
             (Phase::Prompt, "_trapline_precmd"),
             (Phase::Chpwd, "_trapline_chpwd"),
@@ -430,6 +481,148 @@ impl Engine {
             }
         }
         out
+    }
+
+    /// `_trapline_pre <tool> <args...>`: sets `_tl_prefix`, prints messages,
+    /// returns 1 to block. `None` if any rule needs more than zsh can do.
+    fn compile_pre(&self) -> Option<String> {
+        if self
+            .handlers
+            .iter()
+            .any(|h| h.phase.is_empty() || h.phase.contains(&Phase::Pre))
+        {
+            return None;
+        }
+        let word = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_.+-".contains(c))
+        };
+        let rules: Vec<&Rule> = self
+            .rules
+            .iter()
+            .filter(|r| r.phase == Phase::Pre)
+            .collect();
+        let mut body = String::from(
+            "  local tool=$1; shift\n  local -a pos; local i=1 a\n  \
+             while (( i <= $# )); do a=${@[i]}; case $a in -C|-c) (( i+=2 ));; -*) (( i++ ));; *) break;; esac; done\n  \
+             pos=(\"${(@)@[i,-1]}\")\n  _tl_prefix=(); local _tl_block=0\n",
+        );
+        if rules.iter().any(|r| r.when.git.is_some()) {
+            body.push_str(
+                "  local _tl_repo=0 _tl_root _tl_main _tl_branch _tl_default _tl_rootco\n  _trapline_git && _tl_repo=1\n",
+            );
+        }
+        for r in rules {
+            let a = &r.action;
+            if !a.set_env.is_empty()
+                || !a.deny_write.is_empty()
+                || !a.allow_write.is_empty()
+                || !a.lock_write.is_empty()
+            {
+                return None;
+            }
+            let mut conds = vec![];
+            if !r.tool.is_empty() {
+                if !r.tool.iter().all(|t| word(t)) {
+                    return None;
+                }
+                conds.push(format!("[[ $tool == ({}) ]]", r.tool.join("|")));
+            }
+            if !r.sub.is_empty() {
+                if !r.sub.iter().all(|t| word(t)) {
+                    return None;
+                }
+                conds.push(format!("[[ ${{pos[1]}} == ({}) ]]", r.sub.join("|")));
+            }
+            for (i, want) in r.args_start.iter().enumerate() {
+                if !word(want) {
+                    return None;
+                }
+                conds.push(format!("[[ ${{pos[{}]}} == {} ]]", i + 1, zq(want)));
+            }
+            let w = &r.when;
+            if let Some(f) = &w.root_has {
+                conds.push(format!("_trapline_root_has {}", zq(f)));
+            }
+            for (k, want) in [(&w.env_set, true), (&w.env_unset, false)] {
+                if let Some(k) = k {
+                    if !is_ident(k) {
+                        return None;
+                    }
+                    let op = if want { "==" } else { "!=" };
+                    conds.push(format!("[[ ${{parameters[{k}]}} {op} *-export* ]]"));
+                }
+            }
+            if let Some(ag) = w.agent {
+                conds.push(format!("{}_trapline_is_agent", if ag { "" } else { "! " }));
+            }
+            if let Some(c) = &w.command_missing {
+                if !word(c) {
+                    return None;
+                }
+                conds.push(format!("(( ! $+commands[{c}] ))"));
+            }
+            if let Some(g) = w.git {
+                conds.push(match g {
+                    GitCond::RootOffDefault => "(( _tl_repo )) && [[ $_tl_rootco == 1 && -n $_tl_branch && -n $_tl_default && $_tl_branch != $_tl_default ]]".into(),
+                    GitCond::InRepo => "(( _tl_repo ))".into(),
+                    GitCond::LinkedWorktree => "(( _tl_repo )) && [[ $_tl_rootco == 0 ]]".into(),
+                });
+            }
+            let mut acts = String::new();
+            for (text, color) in [(&a.hint, 90), (&a.warn, 33)] {
+                let Some(t) = text else { continue };
+                // Placeholders need the git state the rule's own condition checks.
+                let needs_branch = t.contains("{branch}") || t.contains("{default}");
+                let needs_repo = t.contains("{root}") || t.contains("{main_root}");
+                if (needs_branch && w.git != Some(GitCond::RootOffDefault))
+                    || (needs_repo && w.git.is_none())
+                {
+                    return None;
+                }
+                let known = ["{branch}", "{default}", "{root}", "{main_root}"];
+                if known
+                    .iter()
+                    .fold(t.to_string(), |a, k| a.replace(k, ""))
+                    .contains('{')
+                {
+                    return None;
+                }
+                let filled = t
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('$', "\\$")
+                    .replace('`', "\\`")
+                    .replace("{branch}", "${_tl_branch}")
+                    .replace("{default}", "${_tl_default}")
+                    .replace("{root}", "${_tl_root}")
+                    .replace("{main_root}", "${_tl_main}");
+                acts.push_str(&format!(
+                    "    print -u2 -r -- $'\\e[{color}m⬡ '\"{filled}\"$'\\e[0m'\n"
+                ));
+            }
+            if a.block {
+                acts.push_str("    _tl_block=1\n");
+            }
+            if !a.wrap.is_empty() {
+                let argv: Vec<String> = a.wrap.iter().map(|x| zq(x)).collect();
+                acts.push_str(&format!(
+                    "    (( ${{#_tl_prefix}} )) || _tl_prefix=({})\n",
+                    argv.join(" ")
+                ));
+            }
+            if acts.is_empty() {
+                continue;
+            }
+            if conds.is_empty() {
+                body.push_str(&acts.replace("\n    ", "\n  ").replacen("    ", "  ", 1));
+            } else {
+                body.push_str(&format!("  if {}; then\n{acts}  fi\n", conds.join(" && ")));
+            }
+        }
+        body.push_str("  return $_tl_block\n");
+        Some(body)
     }
 
     fn compile_phase(&self, phase: Phase) -> Option<String> {
