@@ -126,11 +126,16 @@ keeps its `.git` writable so worktrees can commit, locks the checkout's own
 worktree writable.
 
 ```sh
-sandbox-exec -p "$(trapline sandbox seatbelt)" claude      # macOS
+trapline run --profile agent -- claude                      # rules + sandbox, then exec
+sandbox-exec -p "$(trapline sandbox seatbelt)" claude      # macOS, by hand
 trapline sandbox bwrap                                      # Linux: argv, one per line
 ```
 
-Verified on macOS: writes in a linked worktree and commits from it work; writes
+`run` points `TRAPLINE_CONFIG` at `<config dir>/<profile>.toml`, wraps the command
+in `sandbox-exec` (macOS) or `bwrap` (Linux), and execs it. `--no-sandbox` sets
+only the profile.
+
+Verified on macOS, including `claude -p` run through `trapline run`: writes in a linked worktree and commits from it work; writes
 to the root checkout and a branch switch there are denied. Not tested against
 Claude Code's own sandbox setting, and `sandbox-exec` cannot nest in another
 sandbox.

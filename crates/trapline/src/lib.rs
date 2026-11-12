@@ -33,6 +33,18 @@ enum Cmd {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
+    /// Run a command with a rule profile and, where available, its sandbox:
+    /// `trapline run --profile agent -- claude`.
+    Run {
+        /// Config name under the trapline config dir (`agent` = agent.toml).
+        #[arg(long)]
+        profile: Option<String>,
+        /// Skip the sandbox; only set the profile for the command's hooks.
+        #[arg(long)]
+        no_sandbox: bool,
+        #[arg(last = true, required = true)]
+        cmd: Vec<String>,
+    },
     /// Answer an agent's hook call (JSON on stdin) with the same rules. `claude`
     /// is built in; any other name runs `trapline-agent-<name>` from PATH.
     Agent {
@@ -87,6 +99,118 @@ enum Format {
     Json,
     /// `export K='V'` / `unset K` lines, for prompt markers.
     Shell,
+}
+
+fn sandbox_text(kind: SandboxKind, cwd: PathBuf) -> Result<String, String> {
+    let mut out = String::new();
+    let ev = Event {
+        phase: Phase::Sandbox,
+        tool: None,
+        args: vec![],
+        cwd,
+        env: std::env::vars().collect(),
+        rc: None,
+    };
+    let d = engine()?.handle(&ev);
+    // Profiles match real paths, and /tmp is really /private/tmp. A path
+    // that does not exist yet (a fresh repo has no index) is resolved
+    // through its parent.
+    let real = |paths: &[String]| -> Result<Vec<String>, String> {
+        paths
+            .iter()
+            .map(|p| {
+                let path = std::path::Path::new(p);
+                let c = std::fs::canonicalize(path).or_else(|e| {
+                    match (path.parent(), path.file_name()) {
+                        (Some(parent), Some(name)) => {
+                            std::fs::canonicalize(parent).map(|d| d.join(name))
+                        }
+                        _ => Err(e),
+                    }
+                });
+                let c = c
+                    .map_err(|e| format!("{p}: {e}"))?
+                    .to_string_lossy()
+                    .into_owned();
+                if c.contains(['"', '\n']) {
+                    return Err(format!("unsupported path: {c:?}"));
+                }
+                Ok(c)
+            })
+            .collect()
+    };
+    let (deny, allow, lock) = (
+        real(&d.fs.deny_write)?,
+        real(&d.fs.allow_write)?,
+        real(&d.fs.lock_write)?,
+    );
+    match kind {
+        SandboxKind::Seatbelt => {
+            out.push_str("(version 1)\n(allow default)\n");
+            for p in &deny {
+                out.push_str(&format!("(deny file-write* (subpath \"{p}\"))\n"));
+            }
+            // Later rules win: allows after denies, locks after allows.
+            for p in &allow {
+                out.push_str(&format!("(allow file-write* (subpath \"{p}\"))\n"));
+            }
+            for p in &lock {
+                out.push_str(&format!("(deny file-write* (subpath \"{p}\"))\n"));
+            }
+        }
+        SandboxKind::Bwrap => {
+            out.push_str("bwrap\n--dev-bind\n/\n/\n");
+            for p in &deny {
+                out.push_str(&format!("--ro-bind\n{p}\n{p}\n"));
+            }
+            for p in &allow {
+                out.push_str(&format!("--bind\n{p}\n{p}\n"));
+            }
+            for p in &lock {
+                out.push_str(&format!("--ro-bind\n{p}\n{p}\n"));
+            }
+            out.push_str("--\n");
+        }
+    }
+    Ok(out)
+}
+
+fn launch(profile: Option<String>, no_sandbox: bool, cmd: Vec<String>) -> Result<ExitCode, String> {
+    use std::os::unix::process::CommandExt;
+    if let Some(name) = &profile {
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(format!("bad profile name: {name}"));
+        }
+        let dir = config_path()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .ok_or("no config dir")?;
+        // The sandbox below and the child's hooks must read the same file.
+        std::env::set_var("TRAPLINE_CONFIG", dir.join(format!("{name}.toml")));
+    }
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let mut argv: Vec<String> = Vec::new();
+    if !no_sandbox {
+        if cfg!(target_os = "macos") {
+            argv.extend([
+                "sandbox-exec".into(),
+                "-p".into(),
+                sandbox_text(SandboxKind::Seatbelt, cwd)?,
+            ]);
+        } else if cfg!(target_os = "linux") {
+            argv.extend(
+                sandbox_text(SandboxKind::Bwrap, cwd)?
+                    .lines()
+                    .map(String::from),
+            );
+            // The last line is bwrap's own `--`; cmd follows it.
+        }
+    }
+    argv.extend(cmd);
+    let err = std::process::Command::new(&argv[0]).args(&argv[1..]).exec();
+    Err(format!("{}: {err}", argv[0]))
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -166,77 +290,15 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Sandbox { kind, cwd } => {
-            let ev = Event {
-                phase: Phase::Sandbox,
-                tool: None,
-                args: vec![],
-                cwd: cwd.map_or_else(|| std::env::current_dir().map_err(|e| e.to_string()), Ok)?,
-                env: std::env::vars().collect(),
-                rc: None,
-            };
-            let d = engine()?.handle(&ev);
-            // Profiles match real paths, and /tmp is really /private/tmp. A path
-            // that does not exist yet (a fresh repo has no index) is resolved
-            // through its parent.
-            let real = |paths: &[String]| -> Result<Vec<String>, String> {
-                paths
-                    .iter()
-                    .map(|p| {
-                        let path = std::path::Path::new(p);
-                        let c = std::fs::canonicalize(path).or_else(|e| {
-                            match (path.parent(), path.file_name()) {
-                                (Some(parent), Some(name)) => {
-                                    std::fs::canonicalize(parent).map(|d| d.join(name))
-                                }
-                                _ => Err(e),
-                            }
-                        });
-                        let c = c
-                            .map_err(|e| format!("{p}: {e}"))?
-                            .to_string_lossy()
-                            .into_owned();
-                        if c.contains(['"', '\n']) {
-                            return Err(format!("unsupported path: {c:?}"));
-                        }
-                        Ok(c)
-                    })
-                    .collect()
-            };
-            let (deny, allow, lock) = (
-                real(&d.fs.deny_write)?,
-                real(&d.fs.allow_write)?,
-                real(&d.fs.lock_write)?,
-            );
-            match kind {
-                SandboxKind::Seatbelt => {
-                    println!("(version 1)\n(allow default)");
-                    for p in &deny {
-                        println!("(deny file-write* (subpath \"{p}\"))");
-                    }
-                    // Later rules win: allows after denies, locks after allows.
-                    for p in &allow {
-                        println!("(allow file-write* (subpath \"{p}\"))");
-                    }
-                    for p in &lock {
-                        println!("(deny file-write* (subpath \"{p}\"))");
-                    }
-                }
-                SandboxKind::Bwrap => {
-                    println!("bwrap\n--dev-bind\n/\n/");
-                    for p in &deny {
-                        println!("--ro-bind\n{p}\n{p}");
-                    }
-                    for p in &allow {
-                        println!("--bind\n{p}\n{p}");
-                    }
-                    for p in &lock {
-                        println!("--ro-bind\n{p}\n{p}");
-                    }
-                    println!("--");
-                }
-            }
+            let cwd = cwd.map_or_else(|| std::env::current_dir().map_err(|e| e.to_string()), Ok)?;
+            print!("{}", sandbox_text(kind, cwd)?);
             Ok(ExitCode::SUCCESS)
         }
+        Cmd::Run {
+            profile,
+            no_sandbox,
+            cmd,
+        } => launch(profile, no_sandbox, cmd),
         Cmd::Eval => {
             let stdin = std::io::read_to_string(std::io::stdin()).map_err(|e| e.to_string())?;
             let ev: Event = serde_json::from_str(&stdin).map_err(|e| format!("bad event: {e}"))?;
