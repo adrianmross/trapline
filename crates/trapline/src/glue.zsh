@@ -5,7 +5,10 @@ autoload -Uz add-zsh-hook
 _trapline_precmd() { eval "$(command trapline check prompt --format shell 2>/dev/null)" }
 precmd_functions=(_trapline_precmd ${precmd_functions:#_trapline_precmd})
 
+# Defaults call the binary; `trapline hook zsh` appends compiled versions of
+# these (pure zsh, no process) when every rule in the phase can be compiled.
 _trapline_chpwd() { command trapline check chpwd --format shell >/dev/null }
+_trapline_notfound_hint() { command trapline check notfound "$1" >/dev/null }
 add-zsh-hook chpwd _trapline_chpwd
 
 # Run a wrapped tool: ask for a prefix (e.g. `devenv shell --`), run, report.
@@ -35,7 +38,7 @@ _trapline_wrap_cnf() {
     _trapline_orig_cnf() { print -u2 "zsh: command not found: $1"; return 127 }
   fi
   command_not_found_handler() {
-    command trapline check notfound "$1" >/dev/null
+    _trapline_notfound_hint "$1"
     _trapline_orig_cnf "$@"
   }
 }

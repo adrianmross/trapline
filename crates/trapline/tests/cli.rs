@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn fixture(name: &str, config: &str) -> (PathBuf, PathBuf) {
@@ -175,5 +175,152 @@ fn eval_reads_an_event_and_external_agent_adapters_dispatch_from_path() {
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim(),
         "adapter-ran arg1"
+    );
+}
+
+fn have(cmd: &str) -> bool {
+    Command::new("sh")
+        .args(["-c", &format!("command -v {cmd}")])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Run `hook zsh` (compiled or not) in a zsh and print the prompt markers and
+/// the not-found hint for one scenario.
+fn zsh_scenario(cfg: &Path, cwd: &Path, compile: bool, entered: bool) -> String {
+    let hook = format!(
+        "eval \"$({} hook zsh {})\"",
+        env!("CARGO_BIN_EXE_trapline"),
+        if compile { "" } else { "--no-compile" }
+    );
+    let script = format!(
+        "{hook}; cd {cwd}; {export}; PATH=\"$PATH\"; _trapline_precmd; \
+         print \"ON=[$DEVENV_ON] OFF=[$DEVENV_OFF]\"; _trapline_notfound_hint nosuchtool",
+        cwd = cwd.display(),
+        export = if entered {
+            "export DEVENV_ROOT=/x"
+        } else {
+            "unset DEVENV_ROOT"
+        },
+    );
+    let out = Command::new("zsh")
+        .args(["-f", "-c", &script])
+        .env("TRAPLINE_CONFIG", cfg)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                std::path::Path::new(env!("CARGO_BIN_EXE_trapline"))
+                    .parent()
+                    .unwrap()
+                    .display(),
+                std::env::var("PATH").unwrap()
+            ),
+        )
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&[out.stdout, out.stderr].concat()).into_owned()
+}
+
+#[test]
+fn compiled_zsh_matches_the_binary_in_every_scenario() {
+    if !have("zsh") {
+        return;
+    }
+    let (d, cfg) = fixture("compile", r#"use = ["devenv"]"#);
+    let outside = std::env::temp_dir().join(format!("trapline-outside-{}", std::process::id()));
+    fs::create_dir_all(&outside).unwrap();
+    for (cwd, entered) in [(&d, false), (&d, true), (&outside, false)] {
+        let compiled = zsh_scenario(&cfg, cwd, true, entered);
+        let binary = zsh_scenario(&cfg, cwd, false, entered);
+        assert_eq!(compiled, binary, "cwd={} entered={entered}", cwd.display());
+    }
+    assert!(zsh_scenario(&cfg, &d, true, false).contains("OFF=[⬡ off]"));
+}
+
+fn git_repo(name: &str) -> PathBuf {
+    let d = std::env::temp_dir()
+        .canonicalize()
+        .unwrap()
+        .join(format!("trapline-sbx-{name}-{}", std::process::id()));
+    fs::create_dir_all(&d).unwrap();
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec![
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "i",
+        ],
+    ] {
+        assert!(Command::new("git")
+            .args(&args)
+            .current_dir(&d)
+            .status()
+            .unwrap()
+            .success());
+    }
+    d
+}
+
+#[test]
+fn sandbox_profile_denies_the_root_checkout_and_really_enforces_on_macos() {
+    if !have("git") {
+        return;
+    }
+    let repo = git_repo("enforce");
+    let (_, cfg) = fixture("sbx", r#"use = ["git"]"#);
+    let out = Command::new(env!("CARGO_BIN_EXE_trapline"))
+        .env("TRAPLINE_CONFIG", &cfg)
+        .args(["sandbox", "seatbelt", "--cwd"])
+        .arg(&repo)
+        .output()
+        .unwrap();
+    let profile = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        profile.contains(&format!(
+            "(deny file-write* (subpath \"{}\"))",
+            repo.display()
+        )),
+        "{profile}"
+    );
+    assert!(profile.contains(&format!(
+        "(allow file-write* (subpath \"{}/.git\"))",
+        repo.display()
+    )));
+
+    // Enforcement is macOS-only, and only if sandbox-exec works here (it cannot
+    // nest inside another sandbox).
+    if !cfg!(target_os = "macos") || !have("sandbox-exec") {
+        return;
+    }
+    let works = Command::new("sandbox-exec")
+        .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !works {
+        return;
+    }
+    let run = |path: &str| {
+        Command::new("sandbox-exec")
+            .args(["-p", &profile, "/usr/bin/touch", path])
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(
+        !run(&format!("{}/new.txt", repo.display())),
+        "root checkout must be read-only"
+    );
+    assert!(
+        run(&format!("{}/.git/new.txt", repo.display())),
+        ".git must stay writable"
     );
 }

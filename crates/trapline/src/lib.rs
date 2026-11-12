@@ -18,7 +18,21 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Print shell glue to eval from your rc file.
-    Hook { shell: String },
+    Hook {
+        shell: String,
+        /// Keep calling the binary for prompt/chpwd/notfound instead of compiling
+        /// those rules to zsh.
+        #[arg(long)]
+        no_compile: bool,
+    },
+    /// Print a sandbox profile that enforces the `sandbox` rules for a directory.
+    /// macOS: `sandbox-exec -p "$(trapline sandbox seatbelt)" claude`.
+    Sandbox {
+        #[arg(value_enum)]
+        kind: SandboxKind,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
     /// Answer an agent's hook call (JSON on stdin) with the same rules. `claude`
     /// is built in; any other name runs `trapline-agent-<name>` from PATH.
     Agent {
@@ -46,6 +60,14 @@ enum Cmd {
         #[arg(last = true)]
         args: Vec<String>,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum SandboxKind {
+    /// macOS `sandbox-exec` profile text.
+    Seatbelt,
+    /// Linux bubblewrap argv, one argument per line.
+    Bwrap,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -117,12 +139,16 @@ pub fn run_main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<ExitCode, String> {
     match cli.cmd {
-        Cmd::Hook { shell } => {
+        Cmd::Hook { shell, no_compile } => {
             if shell != "zsh" {
                 return Err(format!("unsupported shell: {shell} (zsh only for now)"));
             }
             print!("{ZSH_GLUE}");
-            for tool in engine()?.wrapped_tools() {
+            let engine = engine()?;
+            if !no_compile {
+                print!("{}", engine.compile_zsh());
+            }
+            for tool in engine.wrapped_tools() {
                 // Tool names go into shell code; keep them to plain command names.
                 if !tool
                     .chars()
@@ -136,6 +162,78 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                      && functions -c {tool} _trapline_orig_{tool}"
                 );
                 println!("{tool}() {{ _trapline_run {tool} \"$@\" }}");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Sandbox { kind, cwd } => {
+            let ev = Event {
+                phase: Phase::Sandbox,
+                tool: None,
+                args: vec![],
+                cwd: cwd.map_or_else(|| std::env::current_dir().map_err(|e| e.to_string()), Ok)?,
+                env: std::env::vars().collect(),
+                rc: None,
+            };
+            let d = engine()?.handle(&ev);
+            // Profiles match real paths, and /tmp is really /private/tmp. A path
+            // that does not exist yet (a fresh repo has no index) is resolved
+            // through its parent.
+            let real = |paths: &[String]| -> Result<Vec<String>, String> {
+                paths
+                    .iter()
+                    .map(|p| {
+                        let path = std::path::Path::new(p);
+                        let c = std::fs::canonicalize(path).or_else(|e| {
+                            match (path.parent(), path.file_name()) {
+                                (Some(parent), Some(name)) => {
+                                    std::fs::canonicalize(parent).map(|d| d.join(name))
+                                }
+                                _ => Err(e),
+                            }
+                        });
+                        let c = c
+                            .map_err(|e| format!("{p}: {e}"))?
+                            .to_string_lossy()
+                            .into_owned();
+                        if c.contains(['"', '\n']) {
+                            return Err(format!("unsupported path: {c:?}"));
+                        }
+                        Ok(c)
+                    })
+                    .collect()
+            };
+            let (deny, allow, lock) = (
+                real(&d.fs.deny_write)?,
+                real(&d.fs.allow_write)?,
+                real(&d.fs.lock_write)?,
+            );
+            match kind {
+                SandboxKind::Seatbelt => {
+                    println!("(version 1)\n(allow default)");
+                    for p in &deny {
+                        println!("(deny file-write* (subpath \"{p}\"))");
+                    }
+                    // Later rules win: allows after denies, locks after allows.
+                    for p in &allow {
+                        println!("(allow file-write* (subpath \"{p}\"))");
+                    }
+                    for p in &lock {
+                        println!("(deny file-write* (subpath \"{p}\"))");
+                    }
+                }
+                SandboxKind::Bwrap => {
+                    println!("bwrap\n--dev-bind\n/\n/");
+                    for p in &deny {
+                        println!("--ro-bind\n{p}\n{p}");
+                    }
+                    for p in &allow {
+                        println!("--bind\n{p}\n{p}");
+                    }
+                    for p in &lock {
+                        println!("--ro-bind\n{p}\n{p}");
+                    }
+                    println!("--");
+                }
             }
             Ok(ExitCode::SUCCESS)
         }

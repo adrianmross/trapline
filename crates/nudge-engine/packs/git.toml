@@ -40,3 +40,19 @@ id = "git-session-root-off-default"
 phase = "session_start"
 when = { git = "root_off_default" }
 do = { warn = "this is the ROOT checkout and it is on '{branch}', not '{default}'. Root checkouts stay on '{default}'; do feature work in a wt worktree (`wt switch --create <branch>`) and do not edit or commit here." }
+
+# Sandbox: a repo's own checkout stays read-only. Its .git stays writable so a
+# worktree can commit, except the checkout's own HEAD and index, so its branch
+# cannot be switched either. A linked worktree stays writable even when it is
+# nested inside that checkout. Used by `trapline sandbox`.
+[[rule]]
+id = "git-root-readonly"
+phase = "sandbox"
+when = { git = "in_repo" }
+do = { deny_write = ["{main_root}"], allow_write = ["{main_root}/.git"], lock_write = ["{main_root}/.git/HEAD", "{main_root}/.git/index"] }
+
+[[rule]]
+id = "git-worktree-writable"
+phase = "sandbox"
+when = { git = "linked_worktree" }
+do = { allow_write = ["{root}"] }

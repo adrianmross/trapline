@@ -67,16 +67,17 @@ do    = { wrap = ["devenv", "shell", "--no-tui", "--"] }
 
 (`examples/config.toml` is this file.)
 
-- **Phases:** `pre`, `post`, `notfound`, `chpwd`, `prompt`, `session_start`.
+- **Phases:** `pre`, `post`, `notfound`, `chpwd`, `prompt`, `session_start`, `sandbox`.
 - **Matching:** `tool`, `sub` (the first subcommand is one of these) and
   `args_start` (the positional arguments start with these). Global flags such
   as `git -C path` are skipped.
 - **Conditions** (all must hold): `root_has`, `env_set`, `env_unset`,
-  `command_missing`, `agent` (true or false), and `git = "root_off_default"`.
+  `command_missing`, `agent` (true or false), and `git = "root_off_default" | "in_repo" | "linked_worktree"`.
   A fixed set of named checks, no scripting, so a rules file is safe to read.
   Git state is read from `.git` directly; no `git` process runs.
-- **Actions:** `hint`, `warn`, `block`, `wrap`, `set_env`. Messages can use
-  `{branch}`, `{default}` and `{root}`.
+- **Actions:** `hint`, `warn`, `block`, `wrap`, `set_env`, and for the sandbox
+  phase `deny_write`, `allow_write`, `lock_write`. Messages and paths can use
+  `{branch}`, `{default}`, `{root}` and `{main_root}`.
 - **Agents:** a caller is an agent when `AGENT` or `CLAUDECODE` is set in its
   environment. Set `AGENT=1` for anything else.
 
@@ -105,6 +106,34 @@ Agent shells often skip your rc files, so the shell glue never runs there.
   apart: `TRAPLINE_CONFIG=$HOME/.config/trapline/agent.toml trapline agent claude`.
 - Limits: the parser does not look inside `$(...)`, subshells or `cd`, so a rule
   can miss a command hidden there. Treat it as guidance, not a sandbox.
+
+## Fast prompts
+
+`trapline hook zsh` compiles the `prompt`, `chpwd` and `notfound` rules to plain
+zsh when it can, so a prompt starts no process. A phase is compiled only if
+every rule in it is expressible in zsh (no `git` conditions, no `{branch}`
+templates) and no external handler covers it; otherwise that phase keeps
+calling the binary. `--no-compile` forces the binary everywhere. A test checks
+the compiled output equals the binary's in each scenario.
+
+## Sandbox
+
+The same rules can produce an enforced boundary. In the `sandbox` phase a rule
+returns `deny_write`, `allow_write` and `lock_write` paths (a later tier wins
+over an earlier one). The `git` pack makes a repo's own checkout read-only,
+keeps its `.git` writable so worktrees can commit, locks the checkout's own
+`HEAD` and `index` so its branch cannot be switched, and keeps the current
+worktree writable.
+
+```sh
+sandbox-exec -p "$(trapline sandbox seatbelt)" claude      # macOS
+trapline sandbox bwrap                                      # Linux: argv, one per line
+```
+
+Verified on macOS: writes in a linked worktree and commits from it work; writes
+to the root checkout and a branch switch there are denied. Not tested against
+Claude Code's own sandbox setting, and `sandbox-exec` cannot nest in another
+sandbox.
 
 ## Plugins
 

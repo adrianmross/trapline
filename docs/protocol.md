@@ -17,7 +17,7 @@ stdout can be a handler. The types live in `trapline-core`.
 }
 ```
 
-`phase` is one of `pre`, `post`, `notfound`, `chpwd`, `prompt`, `session_start`. `tool` and
+`phase` is one of `pre`, `post`, `notfound`, `chpwd`, `prompt`, `session_start`, `sandbox`. `tool` and
 `args` describe the wrapped command (`tool` is the missing name for
 `notfound`). `rc` is set for `post`.
 
@@ -37,6 +37,8 @@ stdout can be a handler. The types live in `trapline-core`.
 - `prefix` is the argv to run the command under.
 - `set_env` lists every key the handler can set; `null` means unset, so a stale
   marker clears.
+- `fs` (sandbox phase) lists `deny_write`, `allow_write` and `lock_write` paths;
+  each tier overrides the one before it.
 - `fired` names the rules that matched, for explaining a decision.
 
 ## CLI forms

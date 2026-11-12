@@ -103,6 +103,10 @@ pub enum GitCond {
     /// In a repo's root checkout (not a linked worktree) whose branch is not
     /// the default branch.
     RootOffDefault,
+    /// Anywhere inside a git repo (a root checkout or a linked worktree).
+    InRepo,
+    /// Inside a linked worktree, not the repo's own checkout.
+    LinkedWorktree,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -115,6 +119,15 @@ pub struct Action {
     pub wrap: Vec<String>,
     #[serde(default)]
     pub set_env: BTreeMap<String, String>,
+    /// Sandbox phase: paths to make read-only. Templates: `{root}`, `{main_root}`.
+    #[serde(default)]
+    pub deny_write: Vec<String>,
+    /// Sandbox phase: paths to keep writable inside a denied tree.
+    #[serde(default)]
+    pub allow_write: Vec<String>,
+    /// Sandbox phase: paths that stay read-only even inside an allowed tree.
+    #[serde(default)]
+    pub lock_write: Vec<String>,
 }
 
 pub struct Engine {
@@ -204,6 +217,8 @@ impl Engine {
                 GitCond::RootOffDefault => {
                     git_info(&ev.cwd).is_some_and(|i| i.root_checkout && i.branch != i.default)
                 }
+                GitCond::InRepo => repo(&ev.cwd).is_some(),
+                GitCond::LinkedWorktree => repo(&ev.cwd).is_some_and(|r| !r.root_checkout),
             })
     }
 }
@@ -235,17 +250,20 @@ fn positional(args: &[String]) -> &[String] {
     args.get(i..).unwrap_or(&[])
 }
 
-struct GitInfo {
+/// Where a repo lives, from `.git` alone (works on a detached HEAD too).
+struct Repo {
+    /// The checkout containing `cwd`.
     root: PathBuf,
-    branch: String,
-    default: String,
-    /// The repo's own checkout, not a linked worktree.
+    /// The repo's own checkout: `root`, or for a linked worktree the parent of
+    /// the common `.git` directory.
+    main_root: PathBuf,
     root_checkout: bool,
+    gitdir: PathBuf,
+    /// The shared `.git` directory.
+    common: PathBuf,
 }
 
-/// Read the repo state from `.git` directly: no `git` process, so this is cheap
-/// enough for a prompt. `None` outside a repo or on a detached HEAD.
-fn git_info(cwd: &Path) -> Option<GitInfo> {
+fn repo(cwd: &Path) -> Option<Repo> {
     let root = cwd
         .ancestors()
         .find(|d| d.join(".git").exists())?
@@ -258,13 +276,39 @@ fn git_info(cwd: &Path) -> Option<GitInfo> {
         let s = fs::read_to_string(&dotgit).ok()?;
         root.join(s.strip_prefix("gitdir:")?.trim())
     };
-    let head = fs::read_to_string(gitdir.join("HEAD")).ok()?;
-    let branch = head.trim().strip_prefix("ref: refs/heads/")?.to_string();
     // A linked worktree keeps shared refs in the common dir.
     let common = match fs::read_to_string(gitdir.join("commondir")) {
         Ok(c) => gitdir.join(c.trim()),
-        Err(_) => gitdir,
+        Err(_) => gitdir.clone(),
     };
+    let common = common.canonicalize().unwrap_or(common);
+    let main_root = if root_checkout {
+        root.clone()
+    } else {
+        common.parent()?.to_path_buf()
+    };
+    Some(Repo {
+        root,
+        main_root,
+        root_checkout,
+        gitdir,
+        common,
+    })
+}
+
+struct GitInfo {
+    branch: String,
+    default: String,
+    root_checkout: bool,
+}
+
+/// Branch state, read from `.git` directly: no `git` process, so this is cheap
+/// enough for a prompt. `None` outside a repo or on a detached HEAD.
+fn git_info(cwd: &Path) -> Option<GitInfo> {
+    let repo = repo(cwd)?;
+    let head = fs::read_to_string(repo.gitdir.join("HEAD")).ok()?;
+    let branch = head.trim().strip_prefix("ref: refs/heads/")?.to_string();
+    let common = &repo.common;
     let default = fs::read_to_string(common.join("refs/remotes/origin/HEAD"))
         .ok()
         .and_then(|h| {
@@ -282,25 +326,174 @@ fn git_info(cwd: &Path) -> Option<GitInfo> {
                 })
                 .map(String::from)
         })?;
+    let root_checkout = repo.root_checkout;
     Some(GitInfo {
-        root,
         branch,
         default,
         root_checkout,
     })
 }
 
-/// Fill `{branch}`, `{default}` and `{root}` in a message.
+/// Fill `{branch}`, `{default}`, `{root}` and `{main_root}` in a message or path.
 fn fill(text: &str, cwd: &Path) -> String {
     if !text.contains('{') {
         return text.to_string();
     }
-    match git_info(cwd) {
-        Some(i) => text
+    let mut out = text.to_string();
+    if let Some(r) = repo(cwd) {
+        out = out
+            .replace("{root}", &r.root.to_string_lossy())
+            .replace("{main_root}", &r.main_root.to_string_lossy());
+    }
+    if let Some(i) = git_info(cwd) {
+        out = out
             .replace("{branch}", &i.branch)
-            .replace("{default}", &i.default)
-            .replace("{root}", &i.root.to_string_lossy()),
-        None => text.to_string(),
+            .replace("{default}", &i.default);
+    }
+    out
+}
+
+/// Quote a string for zsh with single quotes.
+fn zq(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+fn is_ident(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+impl Engine {
+    /// zsh code that answers the hot phases (`prompt`, `chpwd`, `notfound`)
+    /// without starting a process. A phase is only compiled when every rule in
+    /// it is expressible in zsh and no external handler covers it; otherwise
+    /// the glue keeps calling the binary for that phase.
+    pub fn compile_zsh(&self) -> String {
+        let mut out = String::from(
+            "_trapline_root_has() { local d=$PWD; while :; do [[ -f $d/$1 ]] && return 0; [[ $d == / ]] && return 1; d=${d:h}; done }\n",
+        );
+        let agent = AGENT_VARS
+            .iter()
+            .map(|k| format!("${{parameters[{k}]}} == *-export*"))
+            .collect::<Vec<_>>()
+            .join(" || ");
+        out.push_str(&format!("_trapline_is_agent() {{ [[ {agent} ]] }}\n"));
+        for (phase, name) in [
+            (Phase::Prompt, "_trapline_precmd"),
+            (Phase::Chpwd, "_trapline_chpwd"),
+            (Phase::Notfound, "_trapline_notfound_hint"),
+        ] {
+            if let Some(body) = self.compile_phase(phase) {
+                out.push_str(&format!("{name}() {{\n{body}}}\n"));
+            }
+        }
+        out
+    }
+
+    fn compile_phase(&self, phase: Phase) -> Option<String> {
+        if self
+            .handlers
+            .iter()
+            .any(|h| h.phase.is_empty() || h.phase.contains(&phase))
+        {
+            return None;
+        }
+        // Rules naming a tool only apply to events that have one.
+        let rules: Vec<&Rule> = self
+            .rules
+            .iter()
+            .filter(|r| r.phase == phase && (r.tool.is_empty() || phase == Phase::Notfound))
+            .collect();
+        let mut body = String::new();
+        if phase == Phase::Prompt {
+            let keys: BTreeSet<&str> = rules
+                .iter()
+                .flat_map(|r| r.action.set_env.keys().map(String::as_str))
+                .collect();
+            if !keys.is_empty() {
+                if !keys.iter().all(|k| is_ident(k)) {
+                    return None;
+                }
+                body.push_str(&format!(
+                    "  unset {}\n",
+                    keys.iter().copied().collect::<Vec<_>>().join(" ")
+                ));
+            }
+        }
+        for r in rules {
+            let mut conds = vec![];
+            if !r.tool.is_empty() {
+                if !r
+                    .tool
+                    .iter()
+                    .all(|t| is_ident(&t.replace(['-', '.', '+'], "_")))
+                {
+                    return None;
+                }
+                conds.push(format!("[[ $1 == ({}) ]]", r.tool.join("|")));
+            }
+            let w = &r.when;
+            if w.git.is_some() {
+                return None;
+            }
+            if let Some(f) = &w.root_has {
+                conds.push(format!("_trapline_root_has {}", zq(f)));
+            }
+            for (k, want) in [(&w.env_set, true), (&w.env_unset, false)] {
+                if let Some(k) = k {
+                    if !is_ident(k) {
+                        return None;
+                    }
+                    let op = if want { "==" } else { "!=" };
+                    conds.push(format!("[[ ${{parameters[{k}]}} {op} *-export* ]]"));
+                }
+            }
+            if let Some(a) = w.agent {
+                conds.push(format!("{}_trapline_is_agent", if a { "" } else { "! " }));
+            }
+            if let Some(c) = &w.command_missing {
+                if !is_ident(&c.replace(['-', '.', '+'], "_")) {
+                    return None;
+                }
+                conds.push(format!("(( ! $+commands[{c}] ))"));
+            }
+            let mut acts = String::new();
+            if phase == Phase::Prompt {
+                for (k, v) in &r.action.set_env {
+                    acts.push_str(&format!("    export {k}={}\n", zq(v)));
+                }
+            }
+            if phase != Phase::Prompt {
+                for (text, color) in [(&r.action.hint, 90), (&r.action.warn, 33)] {
+                    let Some(t) = text else { continue };
+                    if t.contains('{') {
+                        return None; // needs git state to fill the template
+                    }
+                    if phase == Phase::Notfound {
+                        acts.push_str(&format!(
+                            "    printf '\\033[{color}m⬡ %s%s\\033[0m\\n' \"$1 \" {} >&2\n",
+                            zq(t)
+                        ));
+                    } else {
+                        acts.push_str(&format!(
+                            "    printf '\\033[{color}m⬡ %s\\033[0m\\n' {} >&2\n",
+                            zq(t)
+                        ));
+                    }
+                }
+            }
+            if acts.is_empty() {
+                continue;
+            }
+            if conds.is_empty() {
+                body.push_str(&acts.replace("\n    ", "\n  ").replacen("    ", "  ", 1));
+            } else {
+                body.push_str(&format!("  if {}; then\n{acts}  fi\n", conds.join(" && ")));
+            }
+        }
+        if body.is_empty() {
+            body.push_str("  :\n");
+        }
+        Some(body)
     }
 }
 
@@ -344,6 +537,12 @@ impl Handler for Engine {
             for (k, v) in &a.set_env {
                 d.set_env.insert(k.clone(), Some(v.clone()));
             }
+            d.fs.deny_write
+                .extend(a.deny_write.iter().map(|p| fill(p, &ev.cwd)));
+            d.fs.allow_write
+                .extend(a.allow_write.iter().map(|p| fill(p, &ev.cwd)));
+            d.fs.lock_write
+                .extend(a.lock_write.iter().map(|p| fill(p, &ev.cwd)));
         }
         for h in self.handlers.iter().filter(|h| {
             (h.phase.is_empty() || h.phase.contains(&ev.phase))
@@ -602,6 +801,74 @@ mod tests {
         );
         assert!(Engine::from_toml_in(r#"use = ["../etc"]"#, Some(&dir)).is_err());
         assert!(Engine::from_toml_in(r#"use = ["missing"]"#, Some(&dir)).is_err());
+    }
+
+    #[test]
+    fn compile_zsh_covers_local_phases_and_falls_back_for_the_rest() {
+        let z = Engine::from_toml(r#"use = ["devenv"]"#)
+            .unwrap()
+            .compile_zsh();
+        assert!(z.contains("_trapline_precmd() {") && z.contains("unset DEVENV_OFF DEVENV_ON"));
+        assert!(z.contains("_trapline_notfound_hint() {"));
+        // No chpwd rules: compiled to a no-op, so no process per cd.
+        assert!(z.contains("_trapline_chpwd() {\n  :\n}"));
+        // A git-state rule in a phase keeps that phase on the binary.
+        let g = Engine::from_toml(
+            "[[rule]]\nid=\"g\"\nphase=\"prompt\"\nwhen={git=\"root_off_default\"}\ndo={set_env={X=\"1\"}}\n",
+        )
+        .unwrap()
+        .compile_zsh();
+        assert!(!g.contains("_trapline_precmd() {"));
+        // An external handler covering a phase does too.
+        let h =
+            Engine::from_toml("[[handler]]\nid=\"h\"\ncommand=[\"true\"]\nphase=[\"prompt\"]\n")
+                .unwrap()
+                .compile_zsh();
+        assert!(!h.contains("_trapline_precmd() {") && h.contains("_trapline_chpwd() {"));
+    }
+
+    fn linked_fixture(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let base = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("nudge-sbx-{name}-{}", std::process::id()));
+        let main = base.join("main");
+        let wt = base.join("wt");
+        let admin = main.join(".git/worktrees/w");
+        fs::create_dir_all(&admin).unwrap();
+        fs::create_dir_all(&wt).unwrap();
+        fs::write(main.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(admin.join("HEAD"), "ref: refs/heads/feat\n").unwrap();
+        fs::write(admin.join("commondir"), "../..\n").unwrap();
+        fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+        (main, wt)
+    }
+
+    #[test]
+    fn sandbox_phase_denies_the_root_checkout_and_keeps_worktrees_writable() {
+        let e = Engine::from_toml(r#"use = ["git"]"#).unwrap();
+        let (main, wt) = linked_fixture("a");
+        let root = e.handle(&ev(Phase::Sandbox, None, &main, &[]));
+        assert_eq!(root.fs.deny_write, [main.to_string_lossy()]);
+        assert_eq!(root.fs.allow_write, [format!("{}/.git", main.display())]);
+        assert_eq!(
+            root.fs.lock_write,
+            [
+                format!("{}/.git/HEAD", main.display()),
+                format!("{}/.git/index", main.display())
+            ]
+        );
+        let linked = e.handle(&ev(Phase::Sandbox, None, &wt, &[]));
+        assert_eq!(linked.fs.deny_write, [main.to_string_lossy()]);
+        assert_eq!(
+            linked.fs.allow_write,
+            [
+                format!("{}/.git", main.display()),
+                wt.to_string_lossy().into_owned()
+            ]
+        );
+        let outside = e.handle(&ev(Phase::Sandbox, None, Path::new("/"), &[]));
+        assert!(outside.fs.deny_write.is_empty());
     }
 
     #[test]
