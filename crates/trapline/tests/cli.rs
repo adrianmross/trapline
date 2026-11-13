@@ -88,23 +88,101 @@ fn hook_keeps_existing_functions_and_rejects_odd_tool_names() {
 }
 
 fn agent_claude(cfg: &PathBuf, hook: &str) -> (Option<i32>, String) {
+    agent_call(cfg, hook, "claude", None)
+}
+
+fn agent_call(
+    cfg: &PathBuf,
+    hook: &str,
+    name: &str,
+    devenv: Option<&Path>,
+) -> (Option<i32>, String) {
     use std::io::Write;
     use std::process::Stdio;
-    let mut c = Command::new(env!("CARGO_BIN_EXE_trapline"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_trapline"));
+    command
         .env("TRAPLINE_CONFIG", cfg)
         .env_remove("AGENT")
         .env_remove("CLAUDECODE")
-        .args(["agent", "claude"])
+        .env_remove("DEVENV_ROOT")
+        .args(["agent", name])
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stdout(Stdio::piped());
+    if let Some(path) = devenv {
+        command.env("DEVENV_ROOT", path);
+    }
+    let mut c = command.spawn().unwrap();
     c.stdin.take().unwrap().write_all(hook.as_bytes()).unwrap();
     let out = c.wait_with_output().unwrap();
     (
         out.status.code(),
         String::from_utf8_lossy(&out.stdout).into_owned(),
     )
+}
+
+#[test]
+fn agent_codex_handles_rtk_and_unified_exec_without_approving_commands() {
+    let (d, cfg) = fixture("codex-pre", r#"use = ["git", "wt"]"#);
+    for (tool, field) in [
+        ("Bash", "command"),
+        ("exec_command", "cmd"),
+        ("functions.exec_command", "cmd"),
+    ] {
+        let hook = serde_json::json!({"hook_event_name":"PreToolUse", "tool_name":tool,
+            "cwd": d, "tool_input":{field:"rtk proxy git worktree add ../x"}})
+        .to_string();
+        let (code, output) = agent_call(&cfg, &hook, "codex", None);
+        assert_eq!(code, Some(0));
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(value["hookSpecificOutput"].get("updatedInput").is_none());
+    }
+    let hook = serde_json::json!({"hook_event_name":"PreToolUse", "tool_name":"Bash",
+        "cwd": d, "tool_input":{"command":"rtk wt remove example"}})
+    .to_string();
+    let (_, output) = agent_call(&cfg, &hook, "codex", None);
+    let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert!(value["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("unpushed"));
+    assert!(value["hookSpecificOutput"]
+        .get("permissionDecision")
+        .is_none());
+}
+
+#[test]
+fn agent_codex_reports_actual_activation_and_never_rewrites_wrappers() {
+    let (d, cfg) = fixture("codex-session", r#"use = ["devenv-agent"]"#);
+    let hook = serde_json::json!({"hook_event_name":"SessionStart", "cwd": d}).to_string();
+    let (_, outside) = agent_call(&cfg, &hook, "codex", None);
+    assert!(outside.contains("has not entered"));
+    let (_, inside) = agent_call(&cfg, &hook, "codex", Some(&d));
+    assert!(inside.contains("Verify it matches"));
+    assert!(!inside.contains("has not entered"));
+    let (d, cfg) = fixture(
+        "codex-wrapper",
+        include_str!("../../../examples/config.toml"),
+    );
+    let hook = serde_json::json!({"hook_event_name":"PreToolUse", "tool_name":"exec_command",
+        "cwd":"/", "tool_input":{"cmd":"rtk proxy nvim README.md", "workdir":d}})
+    .to_string();
+    let (_, output) = agent_call(&cfg, &hook, "codex", None);
+    assert!(output.contains("leaves the command unchanged"));
+    assert!(!output.contains("updatedInput"));
+    assert!(!output.contains("permissionDecision"));
+    assert_eq!(
+        agent_call(&cfg, "not json", "codex", None),
+        (Some(0), String::new())
+    );
+    let hook =
+        serde_json::json!({"hook_event_name":"PreToolUse", "tool_name":"apply_patch", "cwd":d,
+        "tool_input":{"command":"git worktree add /tmp/ignored"}})
+        .to_string();
+    assert_eq!(
+        agent_call(&cfg, &hook, "codex", None),
+        (Some(0), String::new())
+    );
 }
 
 #[test]

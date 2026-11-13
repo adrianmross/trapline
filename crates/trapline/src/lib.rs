@@ -46,7 +46,7 @@ enum Cmd {
         cmd: Vec<String>,
     },
     /// Answer an agent's hook call (JSON on stdin) with the same rules. `claude`
-    /// is built in; any other name runs `trapline-agent-<name>` from PATH.
+    /// and `codex` are built in; other names run `trapline-agent-<name>` from PATH.
     Agent {
         name: String,
         /// Extra arguments for an external adapter.
@@ -434,7 +434,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             println!("{}", serde_json::to_string(&d).map_err(|e| e.to_string())?);
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Agent { name, args } if name != "claude" => {
+        Cmd::Agent { name, args } if name != "claude" && name != "codex" => {
             // git-style plugin: trapline-agent-<name> on PATH owns the protocol.
             if !name
                 .chars()
@@ -449,11 +449,14 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 .map_err(|e| format!("{bin}: {e} (is it on PATH?)"))?;
             Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
         }
-        Cmd::Agent { .. } => {
+        Cmd::Agent { name, .. } => {
             let stdin = std::io::read_to_string(std::io::stdin()).map_err(|e| e.to_string())?;
-            if let Some(out) =
-                agent::run_claude(&stdin, &Logged(engine()?), std::env::vars().collect())
-            {
+            let run = if name == "codex" {
+                agent::run_codex
+            } else {
+                agent::run_claude
+            };
+            if let Some(out) = run(&stdin, &Logged(engine()?), std::env::vars().collect()) {
                 println!("{out}");
             }
             Ok(ExitCode::SUCCESS)
