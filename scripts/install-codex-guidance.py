@@ -10,29 +10,42 @@ import shlex
 import tempfile
 
 
-def atomic(path, data):
+def atomic(path, data, mode=0o600):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(dir=path.parent, prefix='.' + path.name + '-')
     try:
         with os.fdopen(fd, 'wb') as output:
             output.write(data)
+        os.chmod(temporary, mode)
         os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def preflight(home, profile_source):
+    profile = home / '.config/trapline/codex.toml'
+    hooks = home / '.codex/hooks.json'
+    data = profile_source.read_bytes()
+    if profile.is_symlink() or (profile.exists() and profile.read_bytes() != data):
+        raise ValueError('Existing Codex guidance profile differs; review it before changing it')
+    if hooks.is_symlink():
+        raise ValueError('Hook definitions are source-managed; merge the sample in their owning worktree')
+    document = json.loads(hooks.read_text()) if hooks.exists() else {}
+    if not isinstance(document, dict) or not isinstance(document.get('hooks', {}), dict):
+        raise ValueError('Existing hook definitions must be a JSON object')
+    for name in ('SessionStart', 'PreToolUse'):
+        groups = document.get('hooks', {}).get(name, [])
+        if not isinstance(groups, list) or any(not isinstance(group, dict) or not isinstance(group.get('hooks', []), list)
+                or any(not isinstance(item, dict) for item in group.get('hooks', [])) for group in groups):
+            raise ValueError('Existing hook groups are invalid')
+    return profile, hooks, data, document
 
 
 def install(home, binary, profile_source):
     binary = binary.resolve(strict=True)
     if not os.access(binary, os.X_OK):
         raise ValueError('Trapline binary must be executable')
-    profile = home / '.config/trapline/codex.toml'
-    hooks = home / '.codex/hooks.json'
-    data = profile_source.read_bytes()
-    if profile.exists() and (profile.is_symlink() or profile.read_bytes() != data):
-        raise ValueError('Existing Codex guidance profile differs; review it before changing it')
-    if hooks.is_symlink():
-        raise ValueError('Hook definitions are source-managed; merge the sample in their owning worktree')
-    document = json.loads(hooks.read_text()) if hooks.exists() else {}
+    profile, hooks, data, document = preflight(home, profile_source)
     groups = document.setdefault('hooks', {})
     command = 'TRAPLINE_CONFIG=' + shlex.quote(str(profile)) + ' ' + shlex.join([str(binary), 'agent', 'codex'])
     handler = {'type': 'command', 'command': command, 'timeout': 3, 'additionalContextLimit': 1000}
