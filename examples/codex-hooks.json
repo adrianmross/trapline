@@ -1,0 +1,30 @@
+{
+  "description": "Trapline guidance for local Codex sessions. Review with /hooks before enabling.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRAPLINE_CONFIG=\"$HOME/.config/trapline/codex.toml\" trapline agent codex",
+            "timeout": 3,
+            "additionalContextLimit": 1000
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|exec_command|shell_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRAPLINE_CONFIG=\"$HOME/.config/trapline/codex.toml\" trapline agent codex",
+            "timeout": 3,
+            "additionalContextLimit": 1000
+          }
+        ]
+      }
+    ]
+  }
+}

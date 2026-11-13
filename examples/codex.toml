@@ -1,0 +1,15 @@
+# Advice only: no command rewriting, execution, network probes, or approval grants.
+use = ["devenv", "devenv-agent", "wt"]
+
+[[rule]]
+id = "project-command-outside-devenv"
+tool = ["cargo", "mvn", "pytest", "obpctl", "devtrust", "handoff"]
+phase = "pre"
+when = { root_has = "devenv.nix", env_unset = "DEVENV_ROOT", agent = true }
+do = { hint = "Use this worktree's devenv for project tools. Run `devenv tasks run project:doctor` when readiness is uncertain; deployment and trust changes still require their normal review." }
+
+[[rule]]
+id = "handoff-owner-context"
+phase = "session_start"
+when = { env_set = "HANDOFF_RUN_DIR", agent = true }
+do = { hint = "This is a checkpointed handoff. Read the run's HANDOFF.md, preserve its scope, update PROGRESS.md, and inspect an existing run before launching another writer. Laptop-only reads can use the named handoff queue." }

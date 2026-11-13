@@ -2,7 +2,13 @@
 # starts. Quiet unless the repo has a devenv.nix. Needs `trapline agent <name>`.
 
 [[rule]]
-id = "devenv-agent-session"
+id = "devenv-agent-session-outside"
 phase = "session_start"
-when = { root_has = "devenv.nix", agent = true }
-do = { hint = "this repo has a devenv.nix and its environment is loaded for the session: run tools directly. After switching worktrees or editing devenv.nix, use `devenv shell -- <cmd>`." }
+when = { root_has = "devenv.nix", env_unset = "DEVENV_ROOT", agent = true }
+do = { hint = "this repo has a devenv.nix but the session has not entered it. Use `devenv shell -- <cmd>` for project tools; do not infer activation from the file's presence." }
+
+[[rule]]
+id = "devenv-agent-session-inside"
+phase = "session_start"
+when = { root_has = "devenv.nix", env_set = "DEVENV_ROOT", agent = true }
+do = { hint = "DEVENV_ROOT is set. Verify it matches this worktree before using project tools. After switching worktrees or editing devenv.nix, re-enter with `devenv shell -- <cmd>`." }

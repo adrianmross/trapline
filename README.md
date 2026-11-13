@@ -107,6 +107,40 @@ Agent shells often skip your rc files, so the shell glue never runs there.
 - Limits: the parser does not look inside `$(...)`, subshells or `cd`, so a rule
   can miss a command hidden there. Treat it as guidance, not a sandbox.
 
+## Codex
+
+`trapline agent codex` handles Codex `SessionStart` and shell `PreToolUse`
+events, including canonical `Bash` and unified-exec `cmd` payloads. It recognizes
+`rtk git ...` and `rtk proxy git ...` without changing the command. Explicit
+unified-exec workdirs are used when evaluating the command's repository context.
+Unsupported tools and malformed events produce no decision.
+
+Start with `examples/codex.toml` and merge the two hook groups from
+`examples/codex-hooks.json` into your existing Codex hook configuration. Keep
+existing hooks. Use an absolute installed trapline path if it is not on the
+hook process's PATH. Review the exact definitions using Codex `/hooks`; the
+adapter does not modify hook-trust records or bypass review. Newly configured
+hooks affect new sessions; do not restart active work to pick them up.
+
+The sample profile gives advice only. The adapter can return an explicit denial
+when a selected rule blocks, but never grants approval or rewrites a tool call.
+Wrapper rules are surfaced as advice to enter the environment explicitly.
+`PermissionRequest` is not handled. Existing Codex sandbox and approval controls
+remain in force; do not stack trapline's OS sandbox around Codex by default.
+The built-in devenv guidance distinguishes an unset `DEVENV_ROOT` from a set one
+and asks you to confirm it matches the worktree after switching.
+
+Codex hooks must use a supported local execution path. Cloud-orchestrated
+sessions may not load local command hooks; skipped or untrusted hooks do not
+prove coverage. Test with a real disposable Codex session after review.
+
+For this repository, `devenv tasks run project:doctor`, `project:test`, and
+`project:verify` provide the environment/readiness, test, and format/lint steps.
+They are explicit tasks, not shell-entry deployment actions. Keep cloud target
+validation in the owning CLI and CA installation in the reviewed trust tool.
+devenv manages project dependencies and services; Rex keeps remote terminals,
+and the handoff queue supplies approved laptop-only inputs.
+
 ## Fast prompts
 
 `trapline hook zsh` compiles the `prompt`, `chpwd` and `notfound` rules to plain
@@ -202,3 +236,12 @@ every rule in them can be expressed in zsh, including reading branch state from
 `post` phase costs nothing unless a rule uses it. A phase with an external
 handler, or a rule zsh cannot express, keeps calling the binary
 (`trapline hook zsh --no-compile` forces that everywhere).
+
+## Shared project checks
+
+Run `devenv tasks run project:doctor project:test project:verify` locally or on
+Linux. Listing all three supports older devenv clients that only run named
+tasks. The lock pins the project toolchain; doctor reports the actual selected
+environment. Tests cover adapter decisions, RTK commands and additive hook
+installation. Verify also checks formatting and Clippy. No Portless watcher is
+configured for this CLI repository.

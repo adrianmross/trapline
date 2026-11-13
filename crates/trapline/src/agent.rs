@@ -25,7 +25,19 @@ pub fn simple_commands(line: &str) -> Vec<(String, Vec<String>)> {
         let mut it = cur
             .drain(..)
             .skip_while(|w| is_assignment(w) || PASSTHROUGH.contains(&w.as_str()));
-        if let Some(tool) = it.next() {
+        if let Some(mut tool) = it.next() {
+            if std::path::Path::new(&tool)
+                .file_name()
+                .is_some_and(|n| n == "rtk")
+            {
+                let Some(next) = it.next() else { return };
+                tool = if next == "proxy" {
+                    let Some(next) = it.next() else { return };
+                    next
+                } else {
+                    next
+                };
+            }
             out.push((tool, it.collect()));
         }
     };
@@ -123,6 +135,79 @@ pub fn run_claude(
     claude_output(&name, &d)
 }
 
+/// Codex uses the same hook envelope, with unified-exec aliases in some clients.
+/// Return guidance or a denial, never an approval or rewritten command.
+pub fn run_codex(
+    stdin: &str,
+    handler: &dyn Handler,
+    mut env: BTreeMap<String, String>,
+) -> Option<Value> {
+    let hook: Value = serde_json::from_str(stdin).ok()?;
+    let name = hook.get("hook_event_name")?.as_str()?;
+    let cwd = PathBuf::from(hook.get("cwd")?.as_str()?);
+    env.insert("AGENT".into(), "1".into());
+    let mut event = Event {
+        phase: Phase::SessionStart,
+        tool: None,
+        args: vec![],
+        cwd,
+        env,
+        rc: None,
+    };
+    let decision = match name {
+        "SessionStart" => handler.handle(&event),
+        "PreToolUse" => {
+            let tool = hook.get("tool_name")?.as_str()?;
+            if !matches!(
+                tool,
+                "Bash" | "exec_command" | "functions.exec_command" | "shell_command"
+            ) {
+                return None;
+            }
+            let input = hook.get("tool_input")?;
+            let command = input
+                .get("command")
+                .or_else(|| input.get("cmd"))?
+                .as_str()?;
+            if let Some(workdir) = input.get("workdir").and_then(Value::as_str) {
+                let path = PathBuf::from(workdir);
+                if path.is_absolute() {
+                    event.cwd = path;
+                }
+            }
+            merge(simple_commands(command).into_iter().map(|(tool, args)| {
+                event.phase = Phase::Pre;
+                event.tool = Some(tool);
+                event.args = args;
+                handler.handle(&event)
+            }))
+        }
+        _ => return None,
+    };
+    if !decision.proceed && name == "SessionStart" {
+        let reason = decision
+            .messages
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Some(json!({"continue": false, "stopReason": reason}));
+    }
+    let mut output = claude_output(name, &decision);
+    if decision.proceed && !decision.prefix.is_empty() {
+        let warning = "An environment wrapper rule matched. The Codex adapter leaves the command unchanged; enter the environment explicitly.";
+        let value = output.get_or_insert_with(
+            || json!({"hookSpecificOutput": {"hookEventName": name, "additionalContext": ""}}),
+        );
+        let context = value["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default();
+        value["hookSpecificOutput"]["additionalContext"] =
+            Value::String(format!("{context}\n{warning}").trim().to_string());
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,6 +232,15 @@ mod tests {
         );
         assert_eq!(cmds("echo hi&"), ["echo hi"]);
         assert!(cmds("echo 'unterminated").is_empty());
+        assert_eq!(
+            cmds("rtk git status && rtk proxy wt list"),
+            ["git status", "wt list"]
+        );
+        assert_eq!(
+            cmds("/opt/homebrew/bin/rtk proxy git -C /tmp status"),
+            ["git -C /tmp status"]
+        );
+        assert!(cmds("rtk proxy").is_empty());
     }
 
     #[test]
