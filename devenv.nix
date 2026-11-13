@@ -20,6 +20,7 @@
       cargo fmt --all --check
       cargo clippy --workspace --all-targets --locked -- -D warnings
       python3 scripts/test-guidance-install.py
+      python3 scripts/test-release-install.py
     '';
   };
 }

@@ -245,3 +245,21 @@ tasks. The lock pins the project toolchain; doctor reports the actual selected
 environment. Tests cover adapter decisions, RTK commands and additive hook
 installation. Verify also checks formatting and Clippy. No Portless watcher is
 configured for this CLI repository.
+
+## Native releases
+
+Tagged releases contain native archives for the platforms built by CI, plus
+SHA-256 files. Compare the archive checksum against the release metadata before
+extracting it. From the extracted directory run:
+
+```sh
+python3 scripts/install-release.py
+```
+
+The installer verifies every bundled file and the host platform before copying
+binaries. Existing hook definitions are preserved; new definitions still need
+normal Codex `/hooks` review. Credentials and hook trust are never packaged.
+A previous manual installation needs `--adopt-existing` after you review it;
+managed binaries that have changed are refused. Backups and the pinned version
+receipt live under `~/.local/state/trapline`. Python 3.9+ suffices to install;
+Rust and Nix are only build-time requirements.

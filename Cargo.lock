@@ -146,14 +146,14 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "nudge-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nudge-engine",
 ]
 
 [[package]]
 name = "nudge-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -303,7 +303,7 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "trapline"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "nudge-engine",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "trapline-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
 ]
