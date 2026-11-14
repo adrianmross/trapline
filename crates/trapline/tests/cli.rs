@@ -66,7 +66,7 @@ fn block_exits_one_and_hook_defines_wrappers() {
         .args(["hook", "zsh"])
         .output()
         .unwrap();
-    assert!(String::from_utf8_lossy(&hook.stdout).contains("rm() { _trapline_run rm"));
+    assert!(String::from_utf8_lossy(&hook.stdout).contains("_trapline_run rm \"$@\""));
 }
 
 #[test]
