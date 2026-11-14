@@ -579,3 +579,27 @@ do = { wrap = ["devenv", "shell", "--no-tui", "--"] }
     );
     assert!(pre_scenario(&cfg, &on_main, true, true, "git worktree add x").contains("rc=1"));
 }
+
+#[test]
+fn wrapper_still_runs_the_tool_when_the_helpers_are_gone() {
+    if !have("zsh") {
+        return;
+    }
+    let (d, cfg) = fixture("wrapfallback", "use = [\"devenv\"]\n[[rule]]\nid = \"w\"\ntool = [\"echo\"]\nphase = \"pre\"\ndo = { hint = \"x\" }\n");
+    let script = format!(
+        "eval \"$({} hook zsh)\"; unfunction _trapline_run _trapline_pre _trapline_post; echo hi",
+        env!("CARGO_BIN_EXE_trapline")
+    );
+    let out = Command::new("zsh")
+        .args(["-f", "-c", &script])
+        .env("TRAPLINE_CONFIG", &cfg)
+        .current_dir(&d)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

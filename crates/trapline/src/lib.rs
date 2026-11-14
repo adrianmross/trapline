@@ -413,7 +413,12 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     "(( $+functions[{tool}] )) && [[ ${{functions[{tool}]}} != *_trapline_run* ]] \
                      && functions -c {tool} _trapline_orig_{tool}"
                 );
-                println!("{tool}() {{ _trapline_run {tool} \"$@\" }}");
+                // A shell snapshot (an agent's Bash tool, say) can keep this function
+                // but drop the `_`-prefixed helpers; then run the tool plainly.
+                println!(
+                    "{tool}() {{ if (( $+functions[_trapline_run] )); then _trapline_run {tool} \"$@\"; \
+                     else command {tool} \"$@\"; fi }}"
+                );
             }
             Ok(ExitCode::SUCCESS)
         }
