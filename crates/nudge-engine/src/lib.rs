@@ -15,6 +15,8 @@ use trapline_core::{Decision, Event, Handler, Level, Message, Phase};
 const DEVENV_PACK: &str = include_str!("../packs/devenv.toml");
 const GIT_PACK: &str = include_str!("../packs/git.toml");
 const WT_PACK: &str = include_str!("../packs/wt.toml");
+const AGENT_BROWSER_PACK: &str = include_str!("../packs/agent-browser.toml");
+const AGENT_BROWSER_STRICT_PACK: &str = include_str!("../packs/agent-browser-strict.toml");
 const DEVENV_AGENT_PACK: &str = include_str!("../packs/devenv-agent.toml");
 
 /// Env vars that mark the caller as an agent. `AGENT=1` is the generic switch.
@@ -66,11 +68,20 @@ pub fn builtin_pack(name: &str) -> Option<&'static str> {
         "git" => Some(GIT_PACK),
         "wt" => Some(WT_PACK),
         "devenv-agent" => Some(DEVENV_AGENT_PACK),
+        "agent-browser" => Some(AGENT_BROWSER_PACK),
+        "agent-browser-strict" => Some(AGENT_BROWSER_STRICT_PACK),
         _ => None,
     }
 }
 
-pub const BUILTIN_PACKS: &[&str] = &["devenv", "devenv-agent", "git", "wt"];
+pub const BUILTIN_PACKS: &[&str] = &[
+    "devenv",
+    "devenv-agent",
+    "git",
+    "wt",
+    "agent-browser",
+    "agent-browser-strict",
+];
 
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {
@@ -115,6 +126,10 @@ pub struct Rule {
     /// The positional arguments start with these (after global flags).
     #[serde(default)]
     pub args_start: Vec<String>,
+    /// Any argument is one of these, or `<one>=...`. Unlike `sub`, flags count,
+    /// and a flag's value cannot hide the match.
+    #[serde(default)]
+    pub args_has: Vec<String>,
     pub phase: Phase,
     #[serde(default)]
     pub when: When,
@@ -248,6 +263,17 @@ impl Engine {
         }
         if !rule.args_start.is_empty() && !pos.starts_with(&rule.args_start) {
             return Some(format!("arguments do not start with {:?}", rule.args_start));
+        }
+        if !rule.args_has.is_empty()
+            && !ev.args.iter().any(|a| {
+                rule.args_has.iter().any(|f| {
+                    a == f
+                        || a.strip_prefix(f.as_str())
+                            .is_some_and(|r| r.starts_with('='))
+                })
+            })
+        {
+            return Some(format!("no argument is one of {:?}", rule.args_has));
         }
         let w = &rule.when;
         let checks: [(bool, String); 6] = [
@@ -542,6 +568,13 @@ impl Engine {
                     return None;
                 }
                 conds.push(format!("[[ ${{pos[1]}} == ({}) ]]", r.sub.join("|")));
+            }
+            if !r.args_has.is_empty() {
+                if !r.args_has.iter().all(|t| word(t)) {
+                    return None;
+                }
+                let pat: Vec<String> = r.args_has.iter().map(|f| format!("{f}|{f}=*")).collect();
+                conds.push(format!("(( ${{#${{(M)@:#({})}}}} ))", pat.join("|")));
             }
             for (i, want) in r.args_start.iter().enumerate() {
                 if !word(want) {
@@ -1132,5 +1165,82 @@ do = { warn = "careful", block = true }"#,
         assert!(!d.proceed);
         assert_eq!(d.messages[0].text, "careful");
         assert!(Engine::from_toml(r#"use = ["nope"]"#).is_err());
+    }
+    fn ab(e: &Engine, agent: bool, env: &[(&str, &str)], args: &[&str]) -> Decision {
+        let mut env = env.to_vec();
+        if agent {
+            env.push(("CLAUDECODE", "1"));
+        }
+        let mut v = ev(Phase::Pre, Some("agent-browser"), Path::new("/"), &env);
+        v.args = args.iter().map(|a| a.to_string()).collect();
+        e.handle(&v)
+    }
+
+    #[test]
+    fn agent_browser_pack_blocks_what_steps_around_its_containment() {
+        let e = Engine::from_toml(r#"use = ["agent-browser"]"#).unwrap();
+        for args in [
+            &["eval", "document.title"][..],
+            &["--action-policy", "p.json", "eval", "1"], // a flag value in front
+            &["addinitscript", "x"],
+            &["--cdp", "9222", "snapshot"],
+            &["--cdp=9222", "snapshot"],
+            &["--auto-connect", "open", "https://a.com"],
+            &["--profile", "/tmp/p", "open", "https://a.com"],
+            &["state", "load", "s.json"],
+        ] {
+            let d = ab(&e, true, &[], args);
+            assert!(!d.proceed, "{args:?} should block an agent");
+            assert!(!d.messages.is_empty(), "{args:?} should say what to do");
+            assert!(
+                !ab(&e, false, &[], args)
+                    .fired
+                    .iter()
+                    .any(|f| f.starts_with("agent-browser")),
+                "{args:?} should not touch a human"
+            );
+        }
+        for args in [
+            &["open", "https://a.com"][..],
+            &[
+                "--allowed-domains",
+                "a.com,*.a.com",
+                "open",
+                "https://a.com",
+            ],
+            &["snapshot"],
+            &["click", "@e3"],
+            &["state", "save", "s.json"],
+        ] {
+            assert!(
+                ab(&e, true, &[], args).fired.is_empty(),
+                "{args:?} should pass"
+            );
+        }
+        let git = e.handle(&ev(
+            Phase::Pre,
+            Some("git"),
+            Path::new("/"),
+            &[("CLAUDECODE", "1")],
+        ));
+        assert!(git.fired.is_empty());
+    }
+
+    #[test]
+    fn agent_browser_strict_pack_needs_an_allowlist_in_the_environment() {
+        let e = Engine::from_toml(r#"use = ["agent-browser-strict"]"#).unwrap();
+        let open = ["open", "https://a.com"];
+        assert!(!ab(&e, true, &[], &open).proceed);
+        assert!(
+            ab(
+                &e,
+                true,
+                &[("AGENT_BROWSER_ALLOWED_DOMAINS", "a.com")],
+                &open
+            )
+            .proceed
+        );
+        assert!(ab(&e, false, &[], &open).proceed);
+        assert!(ab(&e, true, &[], &["snapshot"]).proceed);
     }
 }

@@ -70,7 +70,9 @@ do    = { wrap = ["devenv", "shell", "--no-tui", "--"] }
 - **Phases:** `pre`, `post`, `notfound`, `chpwd`, `prompt`, `session_start`, `sandbox`.
 - **Matching:** `tool`, `sub` (the first subcommand is one of these) and
   `args_start` (the positional arguments start with these). Global flags such
-  as `git -C path` are skipped.
+  as `git -C path` are skipped. `args_has` matches any raw argument, flags
+  included (`--cdp` also matches `--cdp=9222`), for tools whose global flags take
+  values, where `sub` can be fooled by a flag's value.
 - **Conditions** (all must hold): `root_has`, `env_set`, `env_unset`,
   `command_missing`, `agent` (true or false), and `git = "root_off_default" | "in_repo" | "linked_worktree"`.
   A fixed set of named checks, no scripting, so a rules file is safe to read.
@@ -243,7 +245,30 @@ Three extension points, none of which need a change to trapline:
 | `devenv` | Prompt markers (`⬡ devenv` inside, `⬡ off` in a devenv repo you have not entered); a not-found hint pointing at `dev`. |
 | `git` | In a root checkout off the default branch, `commit`/`push`/`add`/`merge`/`rebase` warn (firmer wording for an agent) and never block. Raw `git worktree add` warns a human and blocks an agent, and points at `wt`. |
 | `devenv-agent` | Agent-only: at session start, tells the agent the repo has a devenv and how to use it. Quiet in repos without a `devenv.nix`. |
+| `agent-browser` | Agent-only, for [agent-browser](https://agent-browser.dev): blocks the `eval`-category actions (page scripts can undo its domain allowlist), and `--cdp`, `--auto-connect`, `--profile`, `--restore`, `--state` and `state load` (they attach to an existing browser, so `--allowed-domains` cannot apply). Each block says the command to use instead. |
+| `agent-browser-strict` | Opt-in, with `agent-browser`: blocks an agent's `open` until `AGENT_BROWSER_ALLOWED_DOMAINS` is set in its environment. |
 | `wt` | `wt switch` warns when `devenv` is not on `PATH` (the post-switch warm-up would be skipped). `wt remove` reminds an agent to check unpushed work. |
+
+### Allowed domains for `agent-browser`
+The packs do not know your domains; agent-browser enforces its allowlist
+(`--allowed-domains`, `AGENT_BROWSER_ALLOWED_DOMAINS`, or `allowedDomains` in
+`~/.agent-browser/config.json`, per its security docs). Set it where the agent
+starts. To have trapline require it, add `agent-browser-strict` to `use`, or
+write your own rule with the existing keys, for example:
+
+```toml
+[[rule]]
+id = "browser-no-upload"
+tool = ["agent-browser"]
+args_has = ["upload"]
+phase = "pre"
+when = { agent = true }
+do = { warn = "uploads are blocked for agents; ask the user to do it", block = true }
+```
+
+Not covered: whether an `--allowed-domains` flag is present on the same command
+(rules cannot test for a missing flag), and agent-browser run through a wrapper
+such as `npx`.
 
 ## Status
 

@@ -1,0 +1,34 @@
+# agent-browser (agent-browser.dev), agent callers only. Blocks what steps around
+# its own containment (https://agent-browser.dev/security). Matching is on raw
+# arguments, so it holds even when a global flag with a value comes first.
+# `--allowed-domains` is not required here; see the `agent-browser-strict` pack.
+
+# Page scripts can restore the constructors that --allowed-domains patches (its
+# WebSocket/EventSource blocking is best-effort), and `eval` can read anything on
+# the page. These are the actions in agent-browser's `eval` policy category.
+[[rule]]
+id = "agent-browser-eval"
+tool = ["agent-browser"]
+args_has = ["eval", "evalhandle", "addscript", "addinitscript", "addstyle", "expose", "setcontent"]
+phase = "pre"
+when = { agent = true }
+do = { warn = "agent-browser eval-category actions are blocked: page scripts can undo the domain allowlist. Read the page with `snapshot` or `get text`, and act with `click`/`fill`. To run one under human approval, ask the user.", block = true }
+
+# agent-browser refuses --allowed-domains with these (it cannot contain a browser
+# that already ran), so using them means browsing with no domain fence at all.
+[[rule]]
+id = "agent-browser-unfenced-attach"
+tool = ["agent-browser"]
+args_has = ["--cdp", "--auto-connect", "--profile", "--restore", "--state"]
+phase = "pre"
+when = { agent = true }
+do = { warn = "--cdp/--auto-connect/--profile/--restore/--state attach to an existing browser, so no domain allowlist can apply. Start a fresh one instead: `agent-browser --allowed-domains 'example.com,*.example.com' open <url>`.", block = true }
+
+# Same, for `state load` (replays saved origins).
+[[rule]]
+id = "agent-browser-state-load"
+tool = ["agent-browser"]
+args_start = ["state", "load"]
+phase = "pre"
+when = { agent = true }
+do = { warn = "`state load` replays saved origins before the domain allowlist can check them. Start a fresh session: `agent-browser --allowed-domains 'example.com,*.example.com' open <url>`.", block = true }

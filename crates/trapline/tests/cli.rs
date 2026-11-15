@@ -494,12 +494,13 @@ fn compiled_pre_matches_the_binary_across_repo_states() {
     if !have("zsh") || !have("git") {
         return;
     }
-    let cfg_dir = std::env::temp_dir().join(format!("trapline-pre-{}", std::process::id()));
+    let cfg_dir =
+        std::env::temp_dir().join(format!("trapline-compiled-pre-{}", std::process::id()));
     fs::create_dir_all(&cfg_dir).unwrap();
     let cfg = cfg_dir.join("config.toml");
     fs::write(
         &cfg,
-        r#"use = ["git", "wt"]
+        r#"use = ["git", "wt", "agent-browser", "agent-browser-strict"]
 [[rule]]
 id = "nvim"
 tool = ["nvim"]
@@ -564,6 +565,13 @@ do = { wrap = ["devenv", "shell", "--no-tui", "--"] }
                 "wt remove y",
                 "nvim file",
                 "ls",
+                "agent-browser eval document.title",
+                "agent-browser --action-policy p.json eval 1",
+                "agent-browser --cdp=9222 snapshot",
+                "agent-browser --profile /tmp/p open https://a.com",
+                "agent-browser state load s.json",
+                "agent-browser open https://a.com",
+                "agent-browser snapshot",
             ] {
                 let a = pre_scenario(&cfg, cwd, true, agent, argv);
                 let b = pre_scenario(&cfg, cwd, false, agent, argv);
@@ -578,6 +586,15 @@ do = { wrap = ["devenv", "shell", "--no-tui", "--"] }
         "{hit}"
     );
     assert!(pre_scenario(&cfg, &on_main, true, true, "git worktree add x").contains("rc=1"));
+    let cdp = pre_scenario(
+        &cfg,
+        &plain,
+        true,
+        true,
+        "agent-browser --cdp=9222 snapshot",
+    );
+    assert!(cdp.contains("rc=1"), "{cdp}");
+    assert!(pre_scenario(&cfg, &plain, true, true, "agent-browser snapshot").contains("rc=0"));
 }
 
 #[test]
