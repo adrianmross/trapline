@@ -603,3 +603,116 @@ fn wrapper_still_runs_the_tool_when_the_helpers_are_gone() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+fn sandbox_out(cfg: &Path, kind: &str, cwd: &Path) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_trapline"))
+        .env("TRAPLINE_CONFIG", cfg)
+        .args(["sandbox", kind, "--cwd"])
+        .arg(cwd)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+const HIDE_RULE: &str = r#"use = ["git"]
+[[rule]]
+id = "hide"
+phase = "sandbox"
+do = { deny_read = ["{root}/sec"], allow_domains = ["github.com"] }
+"#;
+
+#[test]
+fn every_sandbox_target_comes_from_the_same_rules() {
+    if !have("git") {
+        return;
+    }
+    let repo = git_repo("targets");
+    fs::create_dir_all(repo.join("sec")).unwrap();
+    let (_, cfg) = fixture("targets", HIDE_RULE);
+    let r = repo.display().to_string();
+
+    let seatbelt = sandbox_out(&cfg, "seatbelt", &repo);
+    assert!(seatbelt.contains(&format!("(deny file-read* (subpath \"{r}/sec\"))")));
+    assert!(seatbelt.contains("; allow_domains is not enforced"));
+
+    let bwrap = sandbox_out(&cfg, "bwrap", &repo);
+    assert!(bwrap.contains(&format!("--tmpfs\n{r}/sec\n")), "{bwrap}");
+
+    // Run from the root checkout: nothing allows the cwd, so the root is denied
+    // (and with it `.git`), and the runtime does not add the cwd to allowWrite.
+    let v: serde_json::Value =
+        serde_json::from_str(&sandbox_out(&cfg, "claude-settings", &repo)).unwrap();
+    let s = &v["sandbox"];
+    assert_eq!(s["enabled"], true);
+    assert_eq!(
+        s["filesystem"]["denyRead"],
+        serde_json::json!([format!("{r}/sec")])
+    );
+    let deny = s["filesystem"]["denyWrite"].as_array().unwrap();
+    for p in [&r, &format!("{r}/.git/HEAD"), &format!("{r}/.git/index")] {
+        assert!(deny.contains(&serde_json::json!(p)), "{deny:?}");
+    }
+    assert_eq!(
+        s["network"]["allowedDomains"],
+        serde_json::json!(["github.com"])
+    );
+
+    let rt: serde_json::Value = serde_json::from_str(&sandbox_out(&cfg, "runtime", &repo)).unwrap();
+    assert!(rt.get("sandbox").is_none());
+    assert!(!rt["filesystem"]["allowWrite"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(r)));
+    assert_eq!(
+        rt["network"]["allowedDomains"],
+        serde_json::json!(["github.com"])
+    );
+
+    // No domain rule: Claude Code gets no `network` key (it prompts), the
+    // runtime gets an explicit empty list (it denies everything).
+    let (_, plain) = fixture("targets-plain", r#"use = ["git"]"#);
+    let v: serde_json::Value =
+        serde_json::from_str(&sandbox_out(&plain, "claude-settings", &repo)).unwrap();
+    assert!(v["sandbox"].get("network").is_none());
+    let rt: serde_json::Value =
+        serde_json::from_str(&sandbox_out(&plain, "runtime", &repo)).unwrap();
+    assert_eq!(rt["network"]["allowedDomains"], serde_json::json!([]));
+}
+
+#[test]
+fn deny_read_really_hides_a_file_on_macos() {
+    if !cfg!(target_os = "macos") || !have("sandbox-exec") || !have("git") {
+        return;
+    }
+    let works = Command::new("sandbox-exec")
+        .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !works {
+        return;
+    }
+    let repo = git_repo("hide");
+    fs::create_dir_all(repo.join("sec")).unwrap();
+    fs::write(repo.join("sec/key"), "secret").unwrap();
+    fs::write(repo.join("open.txt"), "fine").unwrap();
+    let (_, cfg) = fixture("hide", HIDE_RULE);
+    let profile = sandbox_out(&cfg, "seatbelt", &repo);
+    let cat = |f: &str| {
+        Command::new("sandbox-exec")
+            .args(["-p", &profile, "/bin/cat"])
+            .arg(repo.join(f))
+            .output()
+            .unwrap()
+    };
+    assert!(cat("open.txt").status.success());
+    assert!(
+        !cat("sec/key").status.success(),
+        "sec/key must be unreadable"
+    );
+}

@@ -167,6 +167,12 @@ pub struct Action {
     /// Sandbox phase: paths that stay read-only even inside an allowed tree.
     #[serde(default)]
     pub lock_write: Vec<String>,
+    /// Sandbox phase: paths to hide from reads. `~/` expands to the home dir.
+    #[serde(default)]
+    pub deny_read: Vec<String>,
+    /// Sandbox phase: hosts the sandboxed command may reach.
+    #[serde(default)]
+    pub allow_domains: Vec<String>,
 }
 
 pub struct Engine {
@@ -519,6 +525,8 @@ impl Engine {
                 || !a.deny_write.is_empty()
                 || !a.allow_write.is_empty()
                 || !a.lock_write.is_empty()
+                || !a.deny_read.is_empty()
+                || !a.allow_domains.is_empty()
             {
                 return None;
             }
@@ -779,6 +787,9 @@ impl Handler for Engine {
                 .extend(a.allow_write.iter().map(|p| fill(p, &ev.cwd)));
             d.fs.lock_write
                 .extend(a.lock_write.iter().map(|p| fill(p, &ev.cwd)));
+            d.fs.deny_read
+                .extend(a.deny_read.iter().map(|p| fill(p, &ev.cwd)));
+            d.fs.allow_domains.extend(a.allow_domains.iter().cloned());
         }
         for h in self.handlers.iter().filter(|h| {
             (h.phase.is_empty() || h.phase.contains(&ev.phase))

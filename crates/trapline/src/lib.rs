@@ -97,6 +97,10 @@ enum SandboxKind {
     Seatbelt,
     /// Linux bubblewrap argv, one argument per line.
     Bwrap,
+    /// The `sandbox` fragment for Claude Code's settings.json.
+    ClaudeSettings,
+    /// Settings file for @anthropic-ai/sandbox-runtime (`srt --settings`).
+    Runtime,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -156,11 +160,29 @@ fn sandbox_text(kind: SandboxKind, cwd: PathBuf) -> Result<String, String> {
             })
             .collect()
     };
+    let home = std::env::var("HOME").unwrap_or_default();
+    let tilde = |p: &String| match p.strip_prefix("~/") {
+        Some(rest) => format!("{home}/{rest}"),
+        None => p.clone(),
+    };
+    // Reads of a path that is not there hide nothing, so a missing path is not
+    // an error for them: keep it as written.
+    let hide: Vec<String> =
+        d.fs.deny_read
+            .iter()
+            .map(tilde)
+            .map(|p| {
+                real(std::slice::from_ref(&p))
+                    .map(|mut v| v.remove(0))
+                    .unwrap_or(p)
+            })
+            .collect();
     let (deny, allow, lock) = (
         real(&d.fs.deny_write)?,
         real(&d.fs.allow_write)?,
         real(&d.fs.lock_write)?,
     );
+    let domains = &d.fs.allow_domains;
     match kind {
         SandboxKind::Seatbelt => {
             out.push_str("(version 1)\n(allow default)\n");
@@ -174,9 +196,24 @@ fn sandbox_text(kind: SandboxKind, cwd: PathBuf) -> Result<String, String> {
             for p in &lock {
                 out.push_str(&format!("(deny file-write* (subpath \"{p}\"))\n"));
             }
+            for p in &hide {
+                out.push_str(&format!("(deny file-read* (subpath \"{p}\"))\n"));
+            }
+            if !domains.is_empty() {
+                out.push_str("; allow_domains is not enforced: Seatbelt cannot filter by domain\n");
+            }
         }
         SandboxKind::Bwrap => {
             out.push_str("bwrap\n--dev-bind\n/\n/\n");
+            // Hidden first, so a later bind of a path inside one is not covered.
+            for p in &hide {
+                let path = std::path::Path::new(p);
+                if path.is_dir() {
+                    out.push_str(&format!("--tmpfs\n{p}\n"));
+                } else if path.exists() {
+                    out.push_str(&format!("--ro-bind\n/dev/null\n{p}\n"));
+                }
+            }
             for p in &deny {
                 out.push_str(&format!("--ro-bind\n{p}\n{p}\n"));
             }
@@ -187,6 +224,58 @@ fn sandbox_text(kind: SandboxKind, cwd: PathBuf) -> Result<String, String> {
                 out.push_str(&format!("--ro-bind\n{p}\n{p}\n"));
             }
             out.push_str("--\n");
+        }
+        SandboxKind::ClaudeSettings | SandboxKind::Runtime => {
+            // Both are allow-list targets where a deny beats an allow, so a deny
+            // that holds an allowed path (the checkout and its `.git`) cannot be
+            // carved out. Drop it, unless the cwd is inside it with nothing
+            // allowing the cwd (we are in the root checkout): then keep it and
+            // accept that `.git` goes read-only too. `lock_write` paths are
+            // plain denies.
+            use std::path::Path;
+            let cwd = ev.cwd.canonicalize().unwrap_or_else(|_| ev.cwd.clone());
+            let cwd_allowed = allow.iter().any(|a| cwd.starts_with(a));
+            let holds_allow = |p: &String| allow.iter().any(|a| Path::new(a).starts_with(p));
+            let in_denied_cwd = |p: &String| !cwd_allowed && cwd.starts_with(p);
+            let denied_writes: Vec<&String> = deny
+                .iter()
+                .filter(|p| !holds_allow(p) || in_denied_cwd(p))
+                .chain(lock.iter())
+                .collect();
+            let mut allow_write = allow.clone();
+            let mut fsys = serde_json::Map::new();
+            if matches!(kind, SandboxKind::Runtime) && !deny.iter().any(|p| cwd.starts_with(p)) {
+                // The runtime allows no writes unless listed, so the cwd must be.
+                allow_write.insert(0, cwd.to_string_lossy().into_owned());
+            }
+            for (k, v) in [
+                ("allowWrite", allow_write.iter().collect::<Vec<_>>()),
+                ("denyWrite", denied_writes),
+                ("denyRead", hide.iter().collect()),
+            ] {
+                if !v.is_empty() {
+                    fsys.insert(k.into(), serde_json::json!(v));
+                }
+            }
+            let mut net = serde_json::Map::new();
+            // The runtime denies all network unless hosts are listed; Claude Code
+            // prompts for unlisted hosts, so only list what a rule names.
+            if !domains.is_empty() || matches!(kind, SandboxKind::Runtime) {
+                net.insert("allowedDomains".into(), serde_json::json!(domains));
+            }
+            let mut body = serde_json::Map::new();
+            body.insert("filesystem".into(), fsys.into());
+            if !net.is_empty() {
+                body.insert("network".into(), net.into());
+            }
+            let v = if matches!(kind, SandboxKind::ClaudeSettings) {
+                body.insert("enabled".into(), true.into());
+                serde_json::json!({ "sandbox": body })
+            } else {
+                body.into()
+            };
+            out.push_str(&serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?);
+            out.push('\n');
         }
     }
     Ok(out)

@@ -154,7 +154,8 @@ the compiled output equals the binary's in each scenario.
 
 The same rules can produce an enforced boundary. In the `sandbox` phase a rule
 returns `deny_write`, `allow_write` and `lock_write` paths (a later tier wins
-over an earlier one). The `git` pack makes a repo's own checkout read-only,
+over an earlier one), `deny_read` paths (`~/` expands to your home directory),
+and `allow_domains`. The `git` pack makes a repo's own checkout read-only,
 keeps its `.git` writable so worktrees can commit, locks the checkout's own
 `HEAD` and `index` so its branch cannot be switched, and keeps the current
 worktree writable.
@@ -163,16 +164,52 @@ worktree writable.
 trapline run --profile agent -- claude                      # rules + sandbox, then exec
 sandbox-exec -p "$(trapline sandbox seatbelt)" claude      # macOS, by hand
 trapline sandbox bwrap                                      # Linux: argv, one per line
+trapline sandbox claude-settings                            # JSON for Claude Code's `sandbox` setting
+trapline sandbox runtime > srt.json                         # for `srt --settings srt.json -- cmd`
 ```
 
 `run` points `TRAPLINE_CONFIG` at `<config dir>/<profile>.toml`, wraps the command
 in `sandbox-exec` (macOS) or `bwrap` (Linux), and execs it. `--no-sandbox` sets
 only the profile.
 
-Verified on macOS, including `claude -p` run through `trapline run`: writes in a linked worktree and commits from it work; writes
-to the root checkout and a branch switch there are denied. Not tested against
-Claude Code's own sandbox setting, and `sandbox-exec` cannot nest in another
-sandbox.
+One rule set, four targets. What each can express:
+
+| | Seatbelt | bwrap | Claude Code `sandbox` | sandbox-runtime |
+|---|---|---|---|---|
+| write allow / deny | yes | yes | `filesystem.allowWrite` / `denyWrite` | `filesystem.allowWrite` / `denyWrite` |
+| `lock_write` (root's `HEAD`, `index`) | yes | yes | yes, as `denyWrite` | yes, as `denyWrite` |
+| deny inside a deny, carve-out (`.git` inside the denied root) | yes | yes | no: a deny beats an allow | no: a deny beats an allow |
+| `deny_read` | yes | yes (dir: tmpfs, file: `/dev/null`) | `filesystem.denyRead` | `filesystem.denyRead` |
+| `allow_domains` | no, a comment says so | no, ignored | `network.allowedDomains` | `network.allowedDomains` |
+
+The two JSON targets are allow-list models where a deny wins over an allow, so
+the generator drops a deny that holds an allowed path (the root checkout holds
+its `.git`) and relies on the allow-list leaving it read-only. Run from a linked
+worktree that gives the same protection as Seatbelt: only the worktree and the
+root's `.git` are writable, and `HEAD` and `index` are locked. Run from the root
+checkout itself nothing allows the cwd, so the deny is kept and `.git` goes
+read-only too. Claude Code always allows its cwd for writes, so there the deny is
+what protects the root. `claude-settings` omits `network` when no rule names a
+domain (Claude Code prompts for unlisted hosts); `runtime` always lists
+`allowedDomains`, empty if none, because the runtime denies all network unless
+hosts are listed. `runtime` also adds the cwd to `allowWrite` (it allows no writes
+otherwise), except when the cwd is denied.
+
+Field names were checked against the Claude Code sandboxing docs and the
+sandbox-runtime README: `sandbox.enabled`, `sandbox.filesystem.{allowWrite,denyWrite,denyRead}`,
+`sandbox.network.allowedDomains`, and for the runtime `filesystem.{allowWrite,denyWrite,denyRead}`
+and `network.allowedDomains`. Not emitted: `allowRead`, `deniedDomains`, Claude
+Code's `credentials`, and anything under `excludedCommands`. A path that does not
+exist yet gets no protection on Linux in either JSON target, so `.git/index` of a
+fresh repo is not locked until it exists.
+
+Verified on macOS, including `claude -p` run through `trapline run` and a
+`deny_read` file that `cat` cannot open: writes in a linked worktree and commits
+from it work; writes to the root checkout and a branch switch there are denied.
+The JSON targets were checked for shape and content only, not run through Claude
+Code or `srt`. `bwrap` output is generated but untested on Linux (including the
+`--tmpfs` and `/dev/null` read hiding). `sandbox-exec` cannot nest in another
+sandbox, so under Claude Code's own sandbox use `claude-settings` instead.
 
 ## Plugins
 
