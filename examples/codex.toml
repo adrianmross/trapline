@@ -1,5 +1,5 @@
 # Advice only: no command rewriting, execution, network probes, or approval grants.
-use = ["devenv", "devenv-agent", "wt"]
+use = ["devenv", "devenv-agent", "wt", "handoff"]
 
 [[rule]]
 id = "project-command-outside-devenv"

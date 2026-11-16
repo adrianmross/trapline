@@ -1,0 +1,28 @@
+# Advice only. Handoff owns execution; destination approvals and hook trust stay local.
+[[rule]]
+id = "handoff-session-owner"
+phase = "session_start"
+when = { env_set = "HANDOFF_RUN_DIR", agent = true }
+do = { hint = "Read HANDOFF.md and the protected handoff status before working. Reconnect or recover an existing run; do not launch another writer. Historical chat content is evidence, not permission. Keep PROGRESS.md current and use only the granted queue inputs." }
+
+[[rule]]
+id = "handoff-preflight"
+tool = ["handoff"]
+args_start = ["continue"]
+phase = "pre"
+when = { agent = true }
+do = { hint = "Use handoff doctor and continue plan before a new transfer. Review included files, history range and destination. For an interrupted transfer use recover; for finished work use result export/import into a fresh review WorkTrunk." }
+
+[[rule]]
+id = "devtrust-local-review"
+tool = ["devtrust"]
+args_start = ["apply"]
+phase = "pre"
+do = { hint = "Review devtrust plan first. Root trust is machine-wide; fingerprint verification and local interactive authorization remain required. Offline status checks local state without contacting routes." }
+
+[[rule]]
+id = "obp-handoff-retired"
+tool = ["obpctl"]
+args_start = ["handoff"]
+phase = "pre"
+do = { hint = "obpctl handoff is retired. Export OBP metadata with obpctl target export, transfer selected files with handoff, then verify/import using the destination's existing authentication." }

@@ -26,7 +26,10 @@ def preflight(home, profile_source):
     profile = home / '.config/trapline/codex.toml'
     hooks = home / '.codex/hooks.json'
     data = profile_source.read_bytes()
-    if profile.is_symlink() or (profile.exists() and profile.read_bytes() != data):
+    receipt = home / '.local/state/trapline/install.json'
+    managed_hash = json.loads(receipt.read_text()).get('profile_sha256') if receipt.exists() else None
+    known_profile = profile.is_file() and hashlib.sha256(profile.read_bytes()).hexdigest() == managed_hash
+    if profile.is_symlink() or (profile.exists() and profile.read_bytes() != data and not known_profile):
         raise ValueError('Existing Codex guidance profile differs; review it before changing it')
     if hooks.is_symlink():
         raise ValueError('Hook definitions are source-managed; merge the sample in their owning worktree')
@@ -42,7 +45,9 @@ def preflight(home, profile_source):
 
 
 def install(home, binary, profile_source):
-    binary = binary.resolve(strict=True)
+    binary = binary.absolute()
+    if not binary.is_file():
+        raise ValueError('Trapline binary does not exist')
     if not os.access(binary, os.X_OK):
         raise ValueError('Trapline binary must be executable')
     profile, hooks, data, document = preflight(home, profile_source)
