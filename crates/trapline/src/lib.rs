@@ -291,9 +291,62 @@ fn record(ev: &Event, d: &Decision) {
 /// Records every decision it hands back.
 struct Logged(Engine);
 
+/// Opt-in session-local deduplication affects hints only, never warnings or enforcement.
+fn quiet_hints(ev: &Event, d: &mut Decision) {
+    use std::hash::{Hash, Hasher};
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    if ev.env.get("TRAPLINE_HINTS_ONCE").map(String::as_str) != Some("1")
+        || !d.proceed
+        || !d.prefix.is_empty()
+    {
+        return;
+    }
+    let Some(session) = ev
+        .env
+        .get("TRAPLINE_SESSION_ID")
+        .or_else(|| ev.env.get("CODEX_THREAD_ID"))
+    else {
+        return;
+    };
+    let Some(root) = log_path().and_then(|p| p.parent().map(|p| p.join("hints"))) else {
+        return;
+    };
+    if std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&root)
+        .is_err()
+        || root.is_symlink()
+    {
+        return;
+    }
+    // A full cache leaves advice visible rather than growing without a bound.
+    if std::fs::read_dir(&root).map_or(true, |entries| entries.take(1025).count() > 1024) {
+        return;
+    }
+    d.messages.retain(|message| {
+        if message.level != Level::Hint {
+            return true;
+        }
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        (session, &ev.cwd, ev.phase, &d.fired, &message.text).hash(&mut hash);
+        let path = root.join(format!("{:016x}", hash.finish()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+        {
+            Ok(_) => true,
+            Err(error) => error.kind() != std::io::ErrorKind::AlreadyExists,
+        }
+    });
+}
+
 impl Handler for Logged {
     fn handle(&self, ev: &Event) -> Decision {
-        let d = self.0.handle(ev);
+        let mut d = self.0.handle(ev);
+        quiet_hints(ev, &mut d);
         record(ev, &d);
         d
     }
@@ -495,8 +548,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             args,
         } => {
             let ev = cli_event(phase, tool, args, cwd, rc)?;
-            let d = engine()?.handle(&ev);
-            record(&ev, &d);
+            let d = Logged(engine()?).handle(&ev);
             match format {
                 Format::Json => {
                     println!("{}", serde_json::to_string(&d).map_err(|e| e.to_string())?)

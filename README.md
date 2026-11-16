@@ -28,6 +28,11 @@ runner. Where a tool already owns a job, a pack checks state and points at it.
 
 ## Quickstart
 
+Start with [first use, team guidance and quiet hints](docs/first-use.md).
+On macOS, `brew install adrianmross/private/trapline` installs both commands.
+The source-build alternative is below.
+
+
 ```sh
 cargo install --path crates/trapline --path crates/nudge
 ```
@@ -211,7 +216,7 @@ Three extension points, none of which need a change to trapline:
 ## Status
 
 Early. Working: the event protocol, the rules engine, the `devenv`, `git` and
-`wt` packs, zsh glue. Planned: `once` for hints, bash and fish glue,
+`wt` packs, zsh glue. Planned: bash and fish glue,
 `nudge explain`, repo-level `.trapline.toml` with an allow step (repo rules
 limited to `hint`/`warn` until allowed), `trapline serve` (JSON-RPC) and an
 editor plugin.
