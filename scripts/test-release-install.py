@@ -50,6 +50,20 @@ class ReleaseInstall(unittest.TestCase):
         self.assertEqual(len(json.loads(hooks.read_text())['hooks']['SessionStart']), 2)
         self.assertEqual(result['version'], '0.2.0')
 
+    def test_known_managed_profile_upgrades_but_custom_profile_is_preserved(self):
+        release.install(self.root, self.home)
+        profile = self.root / 'examples/codex.toml'
+        profile.write_text('use = ["devenv-agent", "handoff"]\n')
+        self.manifest['files']['examples/codex.toml'] = hashlib.sha256(profile.read_bytes()).hexdigest()
+        self.save_manifest()
+        release.install(self.root, self.home)
+        installed = self.home / '.config/trapline/codex.toml'
+        self.assertIn('handoff', installed.read_text())
+        installed.write_text('custom')
+        with self.assertRaises(ValueError):
+            release.install(self.root, self.home)
+        self.assertEqual(installed.read_text(), 'custom')
+
     def test_bad_artifacts_or_custom_profiles_change_no_binary(self):
         (self.root / 'bin/nudge').write_bytes(b'tampered')
         with self.assertRaisesRegex(ValueError, 'checksum'):

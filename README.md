@@ -263,3 +263,13 @@ A previous manual installation needs `--adopt-existing` after you review it;
 managed binaries that have changed are refused. Backups and the pinned version
 receipt live under `~/.local/state/trapline`. Python 3.9+ suffices to install;
 Rust and Nix are only build-time requirements.
+
+## Handoff guidance
+
+The built-in `handoff` nudge pack supplies advice for checkpoint ownership,
+preflight, recovery, returned results and local trust review. Inspect it with
+`nudge show handoff`; use `trapline explain session_start` for rule decisions.
+The shipped Codex profile includes this pack. Known, unchanged managed profiles
+upgrade through the native installer; customized profiles are preserved. Hooks
+and their trust remain owned by each host. No approval settings are copied.
+Both commands are also available from `adrianmross/private/trapline` on macOS.

@@ -12,6 +12,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use trapline_core::{Decision, Event, Handler, Level, Message, Phase};
 
+const HANDOFF_PACK: &str = include_str!("../packs/handoff.toml");
 const DEVENV_PACK: &str = include_str!("../packs/devenv.toml");
 const GIT_PACK: &str = include_str!("../packs/git.toml");
 const WT_PACK: &str = include_str!("../packs/wt.toml");
@@ -62,6 +63,7 @@ const ZSH_GIT: &str = r#"_trapline_git() {
 
 pub fn builtin_pack(name: &str) -> Option<&'static str> {
     match name {
+        "handoff" => Some(HANDOFF_PACK),
         "devenv" => Some(DEVENV_PACK),
         "git" => Some(GIT_PACK),
         "wt" => Some(WT_PACK),
@@ -70,7 +72,7 @@ pub fn builtin_pack(name: &str) -> Option<&'static str> {
     }
 }
 
-pub const BUILTIN_PACKS: &[&str] = &["devenv", "devenv-agent", "git", "wt"];
+pub const BUILTIN_PACKS: &[&str] = &["devenv", "devenv-agent", "git", "wt", "handoff"];
 
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {
@@ -855,6 +857,23 @@ mod tests {
         fs::create_dir_all(d.join("sub")).unwrap();
         fs::write(d.join("devenv.nix"), "").unwrap();
         d
+    }
+
+    #[test]
+    fn handoff_guidance_is_context_only() {
+        let engine = Engine::from_toml(r#"use = ["handoff"]"#).unwrap();
+        let cwd = repo("handoff");
+        let decision = engine.handle(&ev(
+            Phase::SessionStart,
+            None,
+            &cwd,
+            &[("AGENT", "1"), ("HANDOFF_RUN_DIR", "/run")],
+        ));
+        assert!(!decision.messages.is_empty());
+        assert!(decision.prefix.is_empty());
+        assert!(decision.set_env.is_empty());
+        let ordinary = engine.handle(&ev(Phase::SessionStart, None, &cwd, &[]));
+        assert!(ordinary.messages.is_empty());
     }
 
     #[test]
