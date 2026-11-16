@@ -54,6 +54,23 @@ class GuidanceInstall(unittest.TestCase):
             self.assertIn(str(stable.absolute()), text)
             self.assertNotIn('Cellar', text)
 
+    def test_repeated_package_profile_upgrades_keep_receipts_and_existing_hook_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            binary = home / 'binary'
+            binary.write_text('#!/bin/sh\nexit 0\n'); binary.chmod(0o755)
+            alias = home / 'stable-alias'; alias.symlink_to(binary)
+            profile = home / 'profile.toml'
+            for number in range(3):
+                profile.write_text('use = ["handoff"]\n# generation ' + str(number))
+                module.install(home, alias if number == 0 else binary, profile)
+            hooks = json.loads((home / '.codex/hooks.json').read_text())['hooks']
+            self.assertEqual(len(hooks['SessionStart']), 1)
+            self.assertEqual(len(hooks['PreToolUse']), 1)
+            self.assertIn(str(alias), hooks['SessionStart'][0]['hooks'][0]['command'])
+            stored = json.loads((home / '.local/state/trapline/guidance.json').read_text())
+            self.assertEqual(stored['profile_sha256'], __import__('hashlib').sha256(profile.read_bytes()).hexdigest())
+
 
 if __name__ == '__main__':
     unittest.main()
