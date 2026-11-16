@@ -254,7 +254,7 @@ configured for this CLI repository.
 ## Native releases
 
 Tagged releases contain native archives for the platforms built by CI, plus
-SHA-256 files. Compare the archive checksum against the release metadata before
+SHA-256 files and the first-use/protocol guides for offline reading. Compare the archive checksum against the release metadata before
 extracting it. From the extracted directory run:
 
 ```sh
