@@ -454,6 +454,58 @@ fn explain_says_why_and_log_remembers_what_fired() {
     assert!(String::from_utf8_lossy(&run(&["log"]).stdout).contains("pre"));
 }
 
+#[test]
+fn session_hint_suppression_preserves_warnings_blocks_and_new_sessions() {
+    let config = "[[rule]]\nid=\"hint\"\ntool=[\"x\"]\nphase=\"pre\"\ndo={hint=\"first-use\",warn=\"always-warn\"}\n";
+    let (d, cfg) = fixture("hint-once", config);
+    let check = |session: &str| {
+        let out = trapline(
+            &cfg,
+            &d,
+            &["check", "pre", "x", "--format", "json"],
+            &[
+                ("TRAPLINE_HINTS_ONCE", "1"),
+                ("TRAPLINE_SESSION_ID", session),
+            ],
+        );
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
+    };
+    assert_eq!(check("one")["messages"].as_array().unwrap().len(), 2);
+    let second = check("one");
+    assert_eq!(second["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(second["messages"][0]["level"], "warn");
+    assert_eq!(check("two")["messages"].as_array().unwrap().len(), 2);
+    fs::write(&cfg, config.replace("warn=\"always-warn\"", "block=true")).unwrap();
+    for _ in 0..2 {
+        let value = check("one");
+        assert_eq!(value["proceed"], false);
+        assert_eq!(value["messages"][0]["text"], "first-use");
+    }
+}
+
+#[test]
+fn shared_project_guidance_is_advice_only_and_explicit() {
+    let (d, cfg) = fixture("project-guidance", "use = [\"handoff\"]");
+    fs::write(d.join(".handoff.json"), "{}").unwrap();
+    let out = trapline(
+        &cfg,
+        &d,
+        &["check", "session-start", "--format", "json"],
+        &[("AGENT", "1")],
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["proceed"], true);
+    assert!(value["fired"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "handoff-project-first-use"));
+    assert!(value["messages"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("explicitly adopting"));
+}
+
 /// Run `_trapline_pre` in zsh (compiled or via the binary) for one command and
 /// report its status, prefix and messages.
 fn pre_scenario(cfg: &Path, cwd: &Path, compile: bool, agent: bool, argv: &str) -> String {
