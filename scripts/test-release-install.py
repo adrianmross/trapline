@@ -35,6 +35,21 @@ class ReleaseInstall(unittest.TestCase):
     def save_manifest(self):
         (self.root / 'manifest.json').write_text(json.dumps(self.manifest))
 
+    def test_offline_docs_are_verified_and_unknown_files_refused(self):
+        path = self.root / 'docs/first-use.md'
+        path.parent.mkdir()
+        path.write_text('offline first use')
+        self.manifest['files']['docs/first-use.md'] = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.save_manifest()
+        release.install(self.root, self.home)
+        path.write_text('tampered')
+        with self.assertRaisesRegex(ValueError, 'checksum'):
+            release.install(self.root, self.home)
+        self.manifest['files']['docs/unrecognized.md'] = '0' * 64
+        self.save_manifest()
+        with self.assertRaisesRegex(ValueError, 'file list'):
+            release.install(self.root, self.home)
+
     def test_install_is_additive_idempotent_and_does_not_modify_trust(self):
         hooks = self.home / '.codex/hooks.json'
         hooks.parent.mkdir(parents=True)
