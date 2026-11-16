@@ -26,7 +26,9 @@ def preflight(home, profile_source):
     profile = home / '.config/trapline/codex.toml'
     hooks = home / '.codex/hooks.json'
     data = profile_source.read_bytes()
-    receipt = home / '.local/state/trapline/install.json'
+    receipt = home / '.local/state/trapline/guidance.json'
+    if not receipt.exists():
+        receipt = home / '.local/state/trapline/install.json'
     managed_hash = json.loads(receipt.read_text()).get('profile_sha256') if receipt.exists() else None
     known_profile = profile.is_file() and hashlib.sha256(profile.read_bytes()).hexdigest() == managed_hash
     if profile.is_symlink() or (profile.exists() and profile.read_bytes() != data and not known_profile):
@@ -53,6 +55,18 @@ def install(home, binary, profile_source):
     profile, hooks, data, document = preflight(home, profile_source)
     groups = document.setdefault('hooks', {})
     command = 'TRAPLINE_CONFIG=' + shlex.quote(str(profile)) + ' ' + shlex.join([str(binary), 'agent', 'codex'])
+    for existing_groups in (groups.get(name, []) for name in ('SessionStart', 'PreToolUse')):
+        if not isinstance(existing_groups, list):
+            continue
+        for group in existing_groups:
+            for item in group.get('hooks', []):
+                try:
+                    words = shlex.split(item.get('command', ''))
+                    equivalent = len(words) == 4 and words[0] == 'TRAPLINE_CONFIG=' + str(profile) and words[2:] == ['agent', 'codex'] and Path(words[1]).resolve() == binary.resolve()
+                except (ValueError, TypeError):
+                    equivalent = False
+                if equivalent:
+                    command = item['command']
     handler = {'type': 'command', 'command': command, 'timeout': 3, 'additionalContextLimit': 1000}
     changed = False
     for name in ('SessionStart', 'PreToolUse'):
@@ -72,8 +86,10 @@ def install(home, binary, profile_source):
     atomic(profile, data)
     if changed:
         atomic(hooks, (json.dumps(document, indent=2) + '\n').encode())
-    return {'hooks': str(hooks), 'profile': str(profile), 'profile_sha256': hashlib.sha256(data).hexdigest(),
+    result = {'hooks': str(hooks), 'profile': str(profile), 'profile_sha256': hashlib.sha256(data).hexdigest(),
             'backup': str(backup) if backup else None, 'review': 'Open /hooks in a new Codex session and review the two Trapline definitions. Trust was not modified.'}
+    atomic(home / '.local/state/trapline/guidance.json', (json.dumps(result, indent=2) + '\n').encode())
+    return result
 
 
 def main():

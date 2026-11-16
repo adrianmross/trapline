@@ -273,3 +273,7 @@ The shipped Codex profile includes this pack. Known, unchanged managed profiles
 upgrade through the native installer; customized profiles are preserved. Hooks
 and their trust remain owned by each host. No approval settings are copied.
 Both commands are also available from `adrianmross/private/trapline` on macOS.
+
+Standalone guidance setup records its managed profile hash separately from native
+binary installation. Repeated private-tap upgrades preserve customized profiles
+and reuse an equivalent existing stable hook command, avoiding duplicate hooks.
