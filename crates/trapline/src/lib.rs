@@ -246,9 +246,13 @@ fn sandbox_text(kind: SandboxKind, cwd: PathBuf) -> Result<String, String> {
                 .collect();
             let mut allow_write = allow.clone();
             let mut fsys = serde_json::Map::new();
-            if matches!(kind, SandboxKind::Runtime) && !deny.iter().any(|p| cwd.starts_with(p)) {
+            let cwd_s = cwd.to_string_lossy().into_owned();
+            if matches!(kind, SandboxKind::Runtime)
+                && !deny.iter().any(|p| cwd.starts_with(p))
+                && !allow_write.contains(&cwd_s)
+            {
                 // The runtime allows no writes unless listed, so the cwd must be.
-                allow_write.insert(0, cwd.to_string_lossy().into_owned());
+                allow_write.insert(0, cwd_s);
             }
             for (k, v) in [
                 ("allowWrite", allow_write.iter().collect::<Vec<_>>()),
@@ -264,6 +268,10 @@ fn sandbox_text(kind: SandboxKind, cwd: PathBuf) -> Result<String, String> {
             // prompts for unlisted hosts, so only list what a rule names.
             if !domains.is_empty() || matches!(kind, SandboxKind::Runtime) {
                 net.insert("allowedDomains".into(), serde_json::json!(domains));
+            }
+            if matches!(kind, SandboxKind::Runtime) {
+                // srt 0.0.83 rejects a config without it.
+                net.insert("deniedDomains".into(), serde_json::json!([] as [&str; 0]));
             }
             let mut body = serde_json::Map::new();
             body.insert("filesystem".into(), fsys.into());
