@@ -546,14 +546,9 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 .map_err(|e| format!("{bin}: {e} (is it on PATH?)"))?;
             Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
         }
-        Cmd::Agent { name, .. } => {
+        Cmd::Agent { .. } => {
             let stdin = std::io::read_to_string(std::io::stdin()).map_err(|e| e.to_string())?;
-            let run = if name == "codex" {
-                agent::run_codex
-            } else {
-                agent::run_claude
-            };
-            if let Some(out) = run(&stdin, &Logged(engine()?), std::env::vars().collect()) {
+            if let Some(out) = agent::run(&stdin, &Logged(engine()?), std::env::vars().collect()) {
                 println!("{out}");
             }
             Ok(ExitCode::SUCCESS)

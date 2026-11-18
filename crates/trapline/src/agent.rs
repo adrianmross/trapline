@@ -4,7 +4,7 @@
 
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use trapline_core::{Decision, Event, Handler, Phase};
 
 /// Words that run another command; the real tool follows.
@@ -61,12 +61,30 @@ fn is_assignment(w: &str) -> bool {
     })
 }
 
+/// Shell tool names: Claude Code's and Codex's `Bash`, and the unified-exec
+/// aliases some Codex clients send.
+const SHELL_TOOLS: &[&str] = &[
+    "Bash",
+    "exec_command",
+    "functions.exec_command",
+    "shell_command",
+];
+
 /// Events for one hook invocation, or `None` if the hook is not one we handle.
+/// Claude Code and Codex send the same envelope.
 pub fn events(hook: &Value, mut env: BTreeMap<String, String>) -> Option<(String, Vec<Event>)> {
     let name = hook.get("hook_event_name")?.as_str()?.to_string();
-    let cwd = PathBuf::from(hook.get("cwd")?.as_str()?);
+    let mut cwd = PathBuf::from(hook.get("cwd")?.as_str()?);
     // Whoever calls this is an agent, even if no marker variable is set.
     env.entry("AGENT".into()).or_insert_with(|| "1".into());
+    let tool = hook.get("tool_name").and_then(Value::as_str);
+    let input = hook.get("tool_input");
+    // Codex unified exec can name the directory the command runs in.
+    if let Some(w) = input.and_then(|i| i.get("workdir")).and_then(Value::as_str) {
+        if Path::new(w).is_absolute() {
+            cwd = w.into();
+        }
+    }
     let event = |phase, tool: Option<String>, args| Event {
         phase,
         tool,
@@ -77,21 +95,18 @@ pub fn events(hook: &Value, mut env: BTreeMap<String, String>) -> Option<(String
     };
     let evs = match name.as_str() {
         "SessionStart" => vec![event(Phase::SessionStart, None, vec![])],
-        "PreToolUse" if hook.get("tool_name")?.as_str()? == "Bash" => {
-            let cmd = hook.pointer("/tool_input/command")?.as_str()?;
+        "PreToolUse" if SHELL_TOOLS.contains(&tool?) => {
+            let input = input?;
+            let cmd = input
+                .get("command")
+                .or_else(|| input.get("cmd"))?
+                .as_str()?;
             simple_commands(cmd)
                 .into_iter()
                 .map(|(t, a)| event(Phase::Pre, Some(t), a))
                 .collect()
         }
-        "PreToolUse" => {
-            let tool = hook.get("tool_name")?.as_str()?.to_string();
-            vec![event(
-                Phase::Tool,
-                Some(tool),
-                tool_args(hook.get("tool_input")),
-            )]
-        }
+        "PreToolUse" => vec![event(Phase::Tool, Some(tool?.into()), tool_args(input))],
         _ => return None,
     };
     Some((name, evs))
@@ -124,14 +139,18 @@ pub fn merge(decisions: impl IntoIterator<Item = Decision>) -> Decision {
         })
 }
 
-/// The hook's stdout JSON, or `None` when there is nothing to say.
-pub fn claude_output(hook_event: &str, d: &Decision) -> Option<Value> {
-    let text = d
-        .messages
+/// Join the decision's messages, one per line.
+fn text(d: &Decision) -> String {
+    d.messages
         .iter()
         .map(|m| m.text.as_str())
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n")
+}
+
+/// The hook's stdout JSON, or `None` when there is nothing to say.
+pub fn claude_output(hook_event: &str, d: &Decision) -> Option<Value> {
+    let text = text(d);
     if !d.proceed {
         return Some(json!({"hookSpecificOutput": {
             "hookEventName": hook_event,
@@ -148,79 +167,20 @@ pub fn claude_output(hook_event: &str, d: &Decision) -> Option<Value> {
     }))
 }
 
-/// Run the hook: stdin JSON in, decision JSON out.
-pub fn run_claude(
-    stdin: &str,
-    handler: &dyn Handler,
-    env: BTreeMap<String, String>,
-) -> Option<Value> {
+/// Run the hook for Claude Code or Codex, which share a payload and response
+/// shape: stdin JSON in, response JSON out. Returns guidance or a denial,
+/// never an approval or a rewritten command.
+pub fn run(stdin: &str, handler: &dyn Handler, env: BTreeMap<String, String>) -> Option<Value> {
     let hook: Value = serde_json::from_str(stdin).ok()?;
     let (name, evs) = events(&hook, env)?;
     let d = merge(evs.iter().map(|e| handler.handle(e)));
-    claude_output(&name, &d)
-}
-
-/// Codex uses the same hook envelope, with unified-exec aliases in some clients.
-/// Return guidance or a denial, never an approval or rewritten command.
-pub fn run_codex(
-    stdin: &str,
-    handler: &dyn Handler,
-    mut env: BTreeMap<String, String>,
-) -> Option<Value> {
-    let hook: Value = serde_json::from_str(stdin).ok()?;
-    let name = hook.get("hook_event_name")?.as_str()?;
-    let cwd = PathBuf::from(hook.get("cwd")?.as_str()?);
-    env.insert("AGENT".into(), "1".into());
-    let mut event = Event {
-        phase: Phase::SessionStart,
-        tool: None,
-        args: vec![],
-        cwd,
-        env,
-        rc: None,
-    };
-    let decision = match name {
-        "SessionStart" => handler.handle(&event),
-        "PreToolUse" => {
-            let tool = hook.get("tool_name")?.as_str()?;
-            if !matches!(
-                tool,
-                "Bash" | "exec_command" | "functions.exec_command" | "shell_command"
-            ) {
-                return None;
-            }
-            let input = hook.get("tool_input")?;
-            let command = input
-                .get("command")
-                .or_else(|| input.get("cmd"))?
-                .as_str()?;
-            if let Some(workdir) = input.get("workdir").and_then(Value::as_str) {
-                let path = PathBuf::from(workdir);
-                if path.is_absolute() {
-                    event.cwd = path;
-                }
-            }
-            merge(simple_commands(command).into_iter().map(|(tool, args)| {
-                event.phase = Phase::Pre;
-                event.tool = Some(tool);
-                event.args = args;
-                handler.handle(&event)
-            }))
-        }
-        _ => return None,
-    };
-    if !decision.proceed && name == "SessionStart" {
-        let reason = decision
-            .messages
-            .iter()
-            .map(|m| m.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Some(json!({"continue": false, "stopReason": reason}));
+    // A session cannot be denied like a tool call; stop it instead.
+    if !d.proceed && name == "SessionStart" {
+        return Some(json!({"continue": false, "stopReason": text(&d)}));
     }
-    let mut output = claude_output(name, &decision);
-    if decision.proceed && !decision.prefix.is_empty() {
-        let warning = "An environment wrapper rule matched. The Codex adapter leaves the command unchanged; enter the environment explicitly.";
+    let mut output = claude_output(&name, &d);
+    if d.proceed && !d.prefix.is_empty() {
+        let warning = "An environment wrapper rule matched. The agent hook leaves the command unchanged; enter the environment explicitly.";
         let value = output.get_or_insert_with(
             || json!({"hookSpecificOutput": {"hookEventName": name, "additionalContext": ""}}),
         );

@@ -122,8 +122,12 @@ Agent shells often skip your rc files, so the shell glue never runs there.
 
 ## Codex
 
-`trapline agent codex` handles Codex `SessionStart` and shell `PreToolUse`
-events, including canonical `Bash` and unified-exec `cmd` payloads. It recognizes
+Codex hooks send the same payload and read the same response as Claude Code
+(`hookSpecificOutput` with `additionalContext`, or `permissionDecision: "deny"`
+and `permissionDecisionReason`), so `trapline agent codex` and `trapline agent
+claude` are one implementation. It handles `SessionStart` and `PreToolUse`,
+including canonical `Bash` and unified-exec `cmd` payloads; other tools become
+`tool` events, as for Claude Code. It recognizes
 `rtk git ...` and `rtk proxy git ...` without changing the command. Explicit
 unified-exec workdirs are used when evaluating the command's repository context.
 Unsupported tools and malformed events produce no decision.

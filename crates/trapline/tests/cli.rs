@@ -186,6 +186,41 @@ fn agent_codex_reports_actual_activation_and_never_rewrites_wrappers() {
 }
 
 #[test]
+fn claude_and_codex_answer_documented_codex_payloads_the_same() {
+    let (d, cfg) = fixture("codex-docs", r#"use = ["git", "devenv-agent"]"#);
+    let common = serde_json::json!({"session_id": "s", "transcript_path": null,
+        "cwd": d, "model": "m", "permission_mode": "default"});
+    let with = |extra: serde_json::Value| {
+        let mut v = common.clone();
+        v.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        v.to_string()
+    };
+    let start = with(serde_json::json!({"hook_event_name": "SessionStart", "source": "startup"}));
+    let pre = with(
+        serde_json::json!({"hook_event_name": "PreToolUse", "turn_id": "t",
+        "tool_name": "Bash", "tool_use_id": "u",
+        "tool_input": {"command": "git worktree add ../x"}}),
+    );
+    for hook in [start, pre] {
+        let (_, codex) = agent_call(&cfg, &hook, "codex", None);
+        assert_eq!(codex, agent_call(&cfg, &hook, "claude", None).1);
+        assert!(!codex.is_empty(), "{hook}");
+    }
+    let (_, out) = agent_call(
+        &cfg,
+        &with(serde_json::json!({"hook_event_name": "PreToolUse",
+        "tool_name": "Bash", "tool_input": {"command": "git worktree add ../x"}})),
+        "codex",
+        None,
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+    assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+}
+
+#[test]
 fn agent_claude_denies_raw_worktree_add_inside_a_compound_command() {
     let (d, cfg) = fixture("agent-deny", r#"use = ["git"]"#);
     let hook = format!(

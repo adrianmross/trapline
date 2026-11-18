@@ -58,6 +58,12 @@ strings left out), so `args_has = ["isolation=worktree"]` matches a value and
 
 `trapline agent claude` reads a Claude Code hook payload on stdin and prints the
 hook response on stdout (nothing when there is nothing to say; always exit 0).
+`trapline agent codex` is the same code: Codex sends the same payload and reads
+the same response. Shell calls named `exec_command`, `functions.exec_command`
+or `shell_command`, with the command in `cmd`, count as `Bash`, and an absolute
+`tool_input.workdir` replaces `cwd`. A `block` at `SessionStart` answers
+`{"continue": false, "stopReason": ...}`; a `wrap` is reported as context, never
+applied.
 
 | Hook | Becomes | Response |
 |---|---|---|
