@@ -188,6 +188,17 @@ pub struct Action {
     /// Sandbox phase: hosts the sandboxed command may reach.
     #[serde(default)]
     pub allow_domains: Vec<String>,
+    /// Run this argv in the event's cwd and add one warning per item of the
+    /// JSON array it prints, formatted by `each`. A missing program, a
+    /// non-zero exit, a timeout or output that is not an array adds nothing.
+    #[serde(default)]
+    pub run: Vec<String>,
+    /// Message for each item: `{field}` is the item's field (empty if absent),
+    /// and a `[...]` part is dropped unless every field in it is present.
+    #[serde(default)]
+    pub each: String,
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
 }
 
 pub struct Engine {
@@ -553,6 +564,7 @@ impl Engine {
                 || !a.lock_write.is_empty()
                 || !a.deny_read.is_empty()
                 || !a.allow_domains.is_empty()
+                || !a.run.is_empty()
             {
                 return None;
             }
@@ -709,7 +721,7 @@ impl Engine {
                 conds.push(format!("[[ $1 == ({}) ]]", r.tool.join("|")));
             }
             let w = &r.when;
-            if w.git.is_some() {
+            if w.git.is_some() || !r.action.run.is_empty() {
                 return None;
             }
             if let Some(f) = &w.root_has {
@@ -823,6 +835,13 @@ impl Handler for Engine {
             d.fs.deny_read
                 .extend(a.deny_read.iter().map(|p| fill(p, &ev.cwd)));
             d.fs.allow_domains.extend(a.allow_domains.iter().cloned());
+            if !a.run.is_empty() {
+                d.messages
+                    .extend(run_each(a, ev).into_iter().map(|text| Message {
+                        level: Level::Warn,
+                        text,
+                    }));
+            }
         }
         for h in self.handlers.iter().filter(|h| {
             (h.phase.is_empty() || h.phase.contains(&ev.phase))
@@ -847,18 +866,36 @@ impl Handler for Engine {
 /// Run an external handler: Event JSON on stdin, Decision JSON on stdout,
 /// killed after `timeout_ms`.
 fn run_handler(h: &HandlerCfg, ev: &Event) -> Result<Decision, String> {
-    let (prog, args) = h.command.split_first().ok_or("empty command")?;
-    let mut child = Command::new(prog)
-        .args(args)
+    let payload = serde_json::to_vec(ev).map_err(|e| e.to_string())?;
+    let out = run_cmd(&h.command, &payload, h.timeout_ms, None, None)?;
+    serde_json::from_slice(&out).map_err(|e| format!("bad decision JSON: {e}"))
+}
+
+/// Run `argv` with `stdin`, killed after `timeout_ms`; its stdout on success.
+/// `path` replaces `$PATH` for finding and running the program.
+fn run_cmd(
+    argv: &[String],
+    stdin: &[u8],
+    timeout_ms: u64,
+    cwd: Option<&Path>,
+    path: Option<&String>,
+) -> Result<Vec<u8>, String> {
+    let (prog, args) = argv.split_first().ok_or("empty command")?;
+    let mut cmd = Command::new(prog);
+    cmd.args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("{prog}: {e}"))?;
-    let payload = serde_json::to_vec(ev).map_err(|e| e.to_string())?;
-    // A handler that exits without reading is fine; ignore the broken pipe.
-    let _ = child.stdin.take().ok_or("no stdin")?.write_all(&payload);
-    let deadline = Instant::now() + Duration::from_millis(h.timeout_ms);
+        .stderr(Stdio::null());
+    if let Some(d) = cwd {
+        cmd.current_dir(d);
+    }
+    if let Some(p) = path {
+        cmd.env("PATH", p);
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("{prog}: {e}"))?;
+    // A program that exits without reading is fine; ignore the broken pipe.
+    let _ = child.stdin.take().ok_or("no stdin")?.write_all(stdin);
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
         match child.try_wait().map_err(|e| e.to_string())? {
             Some(status) if !status.success() => return Err(format!("exited with {status}")),
@@ -866,13 +903,75 @@ fn run_handler(h: &HandlerCfg, ev: &Event) -> Result<Decision, String> {
             None if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("timed out after {}ms", h.timeout_ms));
+                return Err(format!("timed out after {timeout_ms}ms"));
             }
             None => std::thread::sleep(Duration::from_millis(2)),
         }
     }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    serde_json::from_slice(&out.stdout).map_err(|e| format!("bad decision JSON: {e}"))
+    // ponytail: stdout is read after exit, so a program printing more than a
+    // pipe buffer (~64 KiB) stalls until the timeout; read it on a thread if
+    // that ever matters.
+    Ok(child.wait_with_output().map_err(|e| e.to_string())?.stdout)
+}
+
+/// A rule's `run` action: one message per item of the JSON array the command
+/// prints. Any failure is silent, so a missing tool costs nothing.
+fn run_each(a: &Action, ev: &Event) -> Vec<String> {
+    let cwd = ev.cwd.is_dir().then_some(ev.cwd.as_path());
+    // The event's PATH, as `command_missing` reads it.
+    let Ok(out) = run_cmd(&a.run, b"", a.timeout_ms, cwd, ev.env.get("PATH")) else {
+        return vec![];
+    };
+    let Ok(items) = serde_json::from_slice::<Vec<serde_json::Value>>(&out) else {
+        return vec![];
+    };
+    items.iter().map(|item| fill_item(&a.each, item)).collect()
+}
+
+/// `{field}` from a JSON object (strings bare with lines joined by `; `, so a
+/// message stays one line; other values as JSON; absent or null as empty). A
+/// `[...]` part is kept only if every field in it is present.
+fn fill_item(template: &str, item: &serde_json::Value) -> String {
+    let field = |name: &str| match item.get(name) {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => Some(s.lines().collect::<Vec<_>>().join("; ")),
+        Some(v) => Some(v.to_string()),
+    };
+    // (text, every field present) for the outer text and the open `[...]` part.
+    let mut out = String::new();
+    let mut part: Option<(String, bool)> = None;
+    let mut rest = template;
+    while let Some(c) = rest.chars().next() {
+        rest = &rest[c.len_utf8()..];
+        match c {
+            '[' if part.is_none() => part = Some((String::new(), true)),
+            ']' if part.is_some() => {
+                if let Some((text, true)) = part.take() {
+                    out.push_str(&text);
+                }
+            }
+            '{' if rest.contains('}') => {
+                let (name, after) = rest.split_once('}').unwrap();
+                rest = after;
+                let v = field(name);
+                match &mut part {
+                    Some((text, all)) => {
+                        *all &= v.is_some();
+                        text.push_str(&v.unwrap_or_default());
+                    }
+                    None => out.push_str(&v.unwrap_or_default()),
+                }
+            }
+            c => match &mut part {
+                Some((text, _)) => text.push(c),
+                None => out.push(c),
+            },
+        }
+    }
+    if let Some((text, true)) = part {
+        out.push_str(&text);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -992,6 +1091,70 @@ mod tests {
         assert!(!w.proceed);
         let h = e.handle(&git_ev(&["worktree", "add", "../x"], &linked, &[]));
         assert!(h.proceed && h.messages.len() == 1);
+    }
+
+    #[test]
+    fn wt_pack_reports_doctor_findings_and_stays_quiet_otherwise() {
+        use std::os::unix::fs::PermissionsExt;
+        let e = Engine::from_toml(r#"use = ["wt"]"#).unwrap();
+        let cwd = git_repo("doctor", "main");
+        let bin = cwd.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let start = |script: &str| {
+            let wt = bin.join("wt");
+            fs::write(&wt, format!("#!/bin/sh\n{script}\n")).unwrap();
+            fs::set_permissions(&wt, fs::Permissions::from_mode(0o755)).unwrap();
+            let path = format!("{}:/usr/bin:/bin", bin.display());
+            e.handle(&ev(Phase::SessionStart, None, &cwd, &[("PATH", &path)]))
+        };
+        let d = start(
+            r#"[ "$*" = "step doctor --format=json" ] && [ -d .git ] || exit 9
+echo '[{"kind":"nested_worktree","path":"/r/x","fix":"wt step relocate"},
+{"kind":"root_branch","path":"/r","branch":"feat","detail":"main"}]'"#,
+        );
+        let texts: Vec<&str> = d.messages.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "wt step doctor: nested_worktree @ /r/x; run wt step relocate",
+                "wt step doctor: root_branch @ /r (feat): main",
+            ]
+        );
+        assert!(d.proceed);
+        for quiet in ["echo '[]'", "exit 2", "echo nope"] {
+            assert!(start(quiet).messages.is_empty(), "{quiet}");
+        }
+        // No wt on PATH, or not in a repo: nothing, and nothing spawned.
+        let none = ev(Phase::SessionStart, None, &cwd, &[("PATH", "/nonexistent")]);
+        assert!(e.handle(&none).messages.is_empty());
+        let outside = ev(Phase::SessionStart, None, Path::new("/"), &[]);
+        assert_eq!(e.handle(&outside).fired, Vec::<String>::new());
+        // A `run` rule keeps its phase on the binary instead of compiling.
+        let c = Engine::from_toml(
+            r#"[[rule]]
+id = "r"
+phase = "notfound"
+do = { run = ["true"] }"#,
+        )
+        .unwrap();
+        assert!(!c.compile_zsh().contains("_trapline_notfound_hint"));
+        let slow = Engine::from_toml(
+            r#"[[rule]]
+id = "slow"
+phase = "session_start"
+do = { run = ["sleep", "5"], each = "x", timeout_ms = 100 }"#,
+        )
+        .unwrap();
+        let t = Instant::now();
+        assert!(slow.handle(&outside).messages.is_empty());
+        assert!(t.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn fill_item_drops_parts_with_missing_fields() {
+        let item = serde_json::json!({"a": "x\ny", "n": 3, "z": null});
+        assert_eq!(fill_item("{a}[ {b}][ {n}][ {z}]!", &item), "x; y 3!");
+        assert_eq!(fill_item("{b}-{n}", &item), "-3");
     }
 
     #[test]

@@ -80,6 +80,11 @@ do    = { wrap = ["devenv", "shell", "--no-tui", "--"] }
 - **Actions:** `hint`, `warn`, `block`, `wrap`, `set_env`, and for the sandbox
   phase `deny_write`, `allow_write`, `lock_write`. Messages and paths can use
   `{branch}`, `{default}`, `{root}` and `{main_root}`.
+- **`run`** asks a tool for its own report: `do = { run = [argv], each =
+  "...", timeout_ms = 5000 }` runs the argv in the event's cwd and adds one
+  warning per item of the JSON array it prints. In `each`, `{field}` is the
+  item's field and a `[...]` part is dropped unless all its fields are present.
+  A missing program, a non-zero exit, a timeout or other output adds nothing.
 - **Agents:** a caller is an agent when `AGENT` or `CLAUDECODE` is set in its
   environment. Set `AGENT=1` for anything else.
 
@@ -247,7 +252,7 @@ Three extension points, none of which need a change to trapline:
 | `devenv-agent` | Agent-only: at session start, tells the agent the repo has a devenv and how to use it. Quiet in repos without a `devenv.nix`. |
 | `agent-browser` | Agent-only, for [agent-browser](https://agent-browser.dev): blocks the `eval`-category actions (page scripts can undo its domain allowlist), and `--cdp`, `--auto-connect`, `--profile`, `--restore`, `--state` and `state load` (they attach to an existing browser, so `--allowed-domains` cannot apply). Each block says the command to use instead. |
 | `agent-browser-strict` | Opt-in, with `agent-browser`: blocks an agent's `open` until `AGENT_BROWSER_ALLOWED_DOMAINS` is set in its environment. |
-| `wt` | `wt switch` warns when `devenv` is not on `PATH` (the post-switch warm-up would be skipped). `wt remove` reminds an agent to check unpushed work. |
+| `wt` | `wt switch` warns when `devenv` is not on `PATH` (the post-switch warm-up would be skipped). `wt remove` reminds an agent to check unpushed work. At session start, lists `wt step doctor` findings, one line each with its fix (needs a `wt` that has `step doctor --format=json`). |
 
 ### Allowed domains for `agent-browser`
 The packs do not know your domains; agent-browser enforces its allowlist
