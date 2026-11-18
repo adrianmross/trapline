@@ -200,6 +200,16 @@ fn agent_claude_denies_raw_worktree_add_inside_a_compound_command() {
         .as_str()
         .unwrap()
         .contains("wt switch"));
+    let agent = serde_json::json!({"hook_event_name":"PreToolUse", "tool_name":"Agent",
+        "cwd": d, "tool_input":{"prompt":"go", "isolation":"worktree"}})
+    .to_string();
+    let (_, out) = agent_claude(&cfg, &agent);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert!(v["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap()
+        .contains("--no-cd --no-hooks"));
 }
 
 #[test]

@@ -24,6 +24,9 @@ pub enum Phase {
     SessionStart,
     /// Asking which filesystem limits a sandbox should apply for `cwd`.
     Sandbox,
+    /// An agent is about to call one of its own tools (not a shell command):
+    /// `tool` is the tool's name and `args` its input as `key=value`.
+    Tool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

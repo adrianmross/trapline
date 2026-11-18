@@ -56,3 +56,24 @@ id = "git-worktree-writable"
 phase = "sandbox"
 when = { git = "linked_worktree" }
 do = { allow_write = ["{root}"] }
+
+# Claude Code's own worktree tools, seen as `tool` events (`trapline agent
+# claude`, PreToolUse on any tool). `Agent` with `isolation: "worktree"` names
+# the worktree after its internal agent id, so wt makes a throwaway branch.
+[[rule]]
+id = "claude-agent-worktree-isolation"
+tool = ["Agent"]
+args_has = ["isolation=worktree"]
+phase = "tool"
+do = { warn = "do not use isolation: \"worktree\". Create the tree with `wt switch --create <branch> --no-cd --no-hooks` and name its path in the agent's prompt.", block = true }
+
+# `EnterWorktree name=...` only goes through wt while the worktrunk plugin's
+# WorktreeCreate hook is installed; without it the tree lands outside wt's layout.
+[[rule]]
+id = "claude-enter-worktree-without-plugin"
+tool = ["EnterWorktree"]
+args_has = ["name"]
+args_lacks = ["path"]
+phase = "tool"
+when = { path_missing = "~/.claude/plugins/cache/worktrunk" }
+do = { warn = "the worktrunk plugin is not installed, so EnterWorktree name= bypasses wt. Run `wt switch --create <branch> -y`, then EnterWorktree with path= set to the path wt printed.", block = true }

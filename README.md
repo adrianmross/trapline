@@ -67,14 +67,17 @@ do    = { wrap = ["devenv", "shell", "--no-tui", "--"] }
 
 (`examples/config.toml` is this file.)
 
-- **Phases:** `pre`, `post`, `notfound`, `chpwd`, `prompt`, `session_start`, `sandbox`.
+- **Phases:** `pre`, `post`, `notfound`, `chpwd`, `prompt`, `session_start`, `sandbox`,
+  and `tool` (an agent's own tool call, such as Claude Code's `Agent`; its input
+  fields arrive as `key=value` arguments; see `docs/protocol.md`).
 - **Matching:** `tool`, `sub` (the first subcommand is one of these) and
   `args_start` (the positional arguments start with these). Global flags such
   as `git -C path` are skipped. `args_has` matches any raw argument, flags
   included (`--cdp` also matches `--cdp=9222`), for tools whose global flags take
-  values, where `sub` can be fooled by a flag's value.
+  values, where `sub` can be fooled by a flag's value. `args_lacks` is its
+  opposite: no argument is one of these.
 - **Conditions** (all must hold): `root_has`, `env_set`, `env_unset`,
-  `command_missing`, `agent` (true or false), and `git = "root_off_default" | "in_repo" | "linked_worktree"`.
+  `command_missing`, `path_missing` (`~/` is your home), `agent` (true or false), and `git = "root_off_default" | "in_repo" | "linked_worktree"`.
   A fixed set of named checks, no scripting, so a rules file is safe to read.
   Git state is read from `.git` directly; no `git` process runs.
 - **Actions:** `hint`, `warn`, `block`, `wrap`, `set_env`, and for the sandbox
@@ -104,6 +107,9 @@ Agent shells often skip your rc files, so the shell glue never runs there.
 
 - **`SessionStart`** becomes a `session_start` event; messages go to the agent as
   context (and to you as a notice).
+- **`PreToolUse` on any other tool** becomes one `tool` event named after the
+  tool, its input as `key=value` arguments. Add a `PreToolUse` entry with no
+  matcher (or `"Agent|EnterWorktree"`) to send those calls too.
 - **`PreToolUse` on `Bash`** is split into its simple commands (`cd x && git
   commit` is two) and each becomes a `pre` event. A `block` denies the call and
   the reason is shown to the agent; a `hint` or `warn` is added as context and
@@ -248,7 +254,7 @@ Three extension points, none of which need a change to trapline:
 | Pack | What it does |
 |---|---|
 | `devenv` | Prompt markers (`⬡ devenv` inside, `⬡ off` in a devenv repo you have not entered); a not-found hint pointing at `dev`. |
-| `git` | In a root checkout off the default branch, `commit`/`push`/`add`/`merge`/`rebase` warn (firmer wording for an agent) and never block. Raw `git worktree add` warns a human and blocks an agent, and points at `wt`. |
+| `git` | In a root checkout off the default branch, `commit`/`push`/`add`/`merge`/`rebase` warn (firmer wording for an agent) and never block. Raw `git worktree add` warns a human and blocks an agent, and points at `wt`. Claude Code's `Agent` with `isolation: "worktree"` is blocked, and so is `EnterWorktree name=` without `path=` when the worktrunk plugin (`~/.claude/plugins/cache/worktrunk`) is not installed. |
 | `devenv-agent` | Agent-only: at session start, tells the agent the repo has a devenv and how to use it. Quiet in repos without a `devenv.nix`. |
 | `agent-browser` | Agent-only, for [agent-browser](https://agent-browser.dev): blocks the `eval`-category actions (page scripts can undo its domain allowlist), and `--cdp`, `--auto-connect`, `--profile`, `--restore`, `--state` and `state load` (they attach to an existing browser, so `--allowed-domains` cannot apply). Each block says the command to use instead. |
 | `agent-browser-strict` | Opt-in, with `agent-browser`: blocks an agent's `open` until `AGENT_BROWSER_ALLOWED_DOMAINS` is set in its environment. |

@@ -111,6 +111,8 @@ enum PhaseArg {
     Chpwd,
     Prompt,
     SessionStart,
+    /// An agent's own tool call; pass its input as `-- key=value ...`.
+    Tool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -334,6 +336,7 @@ fn cli_event(
             PhaseArg::Chpwd => Phase::Chpwd,
             PhaseArg::Prompt => Phase::Prompt,
             PhaseArg::SessionStart => Phase::SessionStart,
+            PhaseArg::Tool => Phase::Tool,
         },
         tool,
         args,

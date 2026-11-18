@@ -130,6 +130,9 @@ pub struct Rule {
     /// and a flag's value cannot hide the match.
     #[serde(default)]
     pub args_has: Vec<String>,
+    /// No argument is one of these, or `<one>=...`.
+    #[serde(default)]
+    pub args_lacks: Vec<String>,
     pub phase: Phase,
     #[serde(default)]
     pub when: When,
@@ -149,6 +152,8 @@ pub struct When {
     pub agent: Option<bool>,
     /// This command is not found on `$PATH`.
     pub command_missing: Option<String>,
+    /// Nothing exists at this path (`~/` is the event's `$HOME`).
+    pub path_missing: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -275,19 +280,23 @@ impl Engine {
         if !rule.args_start.is_empty() && !pos.starts_with(&rule.args_start) {
             return Some(format!("arguments do not start with {:?}", rule.args_start));
         }
-        if !rule.args_has.is_empty()
-            && !ev.args.iter().any(|a| {
-                rule.args_has.iter().any(|f| {
+        let has = |names: &[String]| {
+            ev.args.iter().any(|a| {
+                names.iter().any(|f| {
                     a == f
                         || a.strip_prefix(f.as_str())
                             .is_some_and(|r| r.starts_with('='))
                 })
             })
-        {
+        };
+        if !rule.args_has.is_empty() && !has(&rule.args_has) {
             return Some(format!("no argument is one of {:?}", rule.args_has));
         }
+        if has(&rule.args_lacks) {
+            return Some(format!("an argument is one of {:?}", rule.args_lacks));
+        }
         let w = &rule.when;
-        let checks: [(bool, String); 6] = [
+        let checks: [(bool, String); 7] = [
             (
                 w.root_has.as_deref().is_none_or(|f| root_has(&ev.cwd, f)),
                 format!("no {} at or above cwd", w.root_has.as_deref().unwrap_or("")),
@@ -318,6 +327,12 @@ impl Engine {
                     .as_deref()
                     .is_none_or(|c| !on_path(&ev.env, c)),
                 format!("{} is on PATH", w.command_missing.as_deref().unwrap_or("")),
+            ),
+            (
+                w.path_missing
+                    .as_deref()
+                    .is_none_or(|p| !expand_home(&ev.env, p).exists()),
+                format!("{} exists", w.path_missing.as_deref().unwrap_or("")),
             ),
             (
                 w.git.is_none_or(|g| match g {
@@ -354,6 +369,14 @@ fn root_has(cwd: &Path, file: &str) -> bool {
 
 fn is_agent(env: &BTreeMap<String, String>) -> bool {
     AGENT_VARS.iter().any(|k| env.contains_key(*k))
+}
+
+/// `~/x` under the event's `$HOME`; other paths as written.
+fn expand_home(env: &BTreeMap<String, String>, p: &str) -> PathBuf {
+    match (p.strip_prefix("~/"), env.get("HOME")) {
+        (Some(rest), Some(home)) => Path::new(home).join(rest),
+        _ => PathBuf::from(p),
+    }
 }
 
 fn on_path(env: &BTreeMap<String, String>, cmd: &str) -> bool {
@@ -588,6 +611,13 @@ impl Engine {
                 let pat: Vec<String> = r.args_has.iter().map(|f| format!("{f}|{f}=*")).collect();
                 conds.push(format!("(( ${{#${{(M)@:#({})}}}} ))", pat.join("|")));
             }
+            if !r.args_lacks.is_empty() {
+                if !r.args_lacks.iter().all(|t| word(t)) {
+                    return None;
+                }
+                let pat: Vec<String> = r.args_lacks.iter().map(|f| format!("{f}|{f}=*")).collect();
+                conds.push(format!("(( ! ${{#${{(M)@:#({})}}}} ))", pat.join("|")));
+            }
             for (i, want) in r.args_start.iter().enumerate() {
                 if !word(want) {
                     return None;
@@ -595,6 +625,9 @@ impl Engine {
                 conds.push(format!("[[ ${{pos[{}]}} == {} ]]", i + 1, zq(want)));
             }
             let w = &r.when;
+            if w.path_missing.is_some() {
+                return None;
+            }
             if let Some(f) = &w.root_has {
                 conds.push(format!("_trapline_root_has {}", zq(f)));
             }
@@ -721,7 +754,11 @@ impl Engine {
                 conds.push(format!("[[ $1 == ({}) ]]", r.tool.join("|")));
             }
             let w = &r.when;
-            if w.git.is_some() || !r.action.run.is_empty() {
+            if w.git.is_some()
+                || w.path_missing.is_some()
+                || !r.action.run.is_empty()
+                || !r.args_lacks.is_empty()
+            {
                 return None;
             }
             if let Some(f) = &w.root_has {
@@ -1148,6 +1185,33 @@ do = { run = ["sleep", "5"], each = "x", timeout_ms = 100 }"#,
         let t = Instant::now();
         assert!(slow.handle(&outside).messages.is_empty());
         assert!(t.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn git_pack_blocks_claude_worktree_tools_that_bypass_wt() {
+        let e = Engine::from_toml(r#"use = ["git"]"#).unwrap();
+        // Tool rules never become shell wrappers.
+        assert!(!e.wrapped_tools().contains("Agent"));
+        let home = std::env::temp_dir().join(format!("nudge-home-{}", std::process::id()));
+        let call = |tool: &str, args: &[&str]| {
+            let mut ev = ev(
+                Phase::Tool,
+                Some(tool),
+                Path::new("/"),
+                &[("HOME", home.to_str().unwrap())],
+            );
+            ev.args = args.iter().map(|a| a.to_string()).collect();
+            e.handle(&ev)
+        };
+        assert!(!call("Agent", &["isolation=worktree", "prompt=x"]).proceed);
+        assert!(call("Agent", &["prompt=x"]).proceed);
+        let named = call("EnterWorktree", &["name=feat"]);
+        assert!(!named.proceed);
+        assert!(named.messages[0].text.contains("wt switch --create"));
+        assert!(call("EnterWorktree", &["name=feat", "path=/w"]).proceed);
+        assert!(call("EnterWorktree", &["path=/w"]).proceed);
+        fs::create_dir_all(home.join(".claude/plugins/cache/worktrunk")).unwrap();
+        assert!(call("EnterWorktree", &["name=feat"]).proceed);
     }
 
     #[test]

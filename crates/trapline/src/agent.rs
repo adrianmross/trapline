@@ -84,9 +84,34 @@ pub fn events(hook: &Value, mut env: BTreeMap<String, String>) -> Option<(String
                 .map(|(t, a)| event(Phase::Pre, Some(t), a))
                 .collect()
         }
+        "PreToolUse" => {
+            let tool = hook.get("tool_name")?.as_str()?.to_string();
+            vec![event(
+                Phase::Tool,
+                Some(tool),
+                tool_args(hook.get("tool_input")),
+            )]
+        }
         _ => return None,
     };
     Some((name, evs))
+}
+
+/// A tool's input as `key=value` arguments, one per top-level field. Strings
+/// are bare, other values JSON; null and empty strings are left out, so
+/// `args_has = ["name"]` means "name is set".
+fn tool_args(input: Option<&Value>) -> Vec<String> {
+    let Some(Value::Object(m)) = input else {
+        return vec![];
+    };
+    m.iter()
+        .filter_map(|(k, v)| match v {
+            Value::Null => None,
+            Value::String(s) if s.is_empty() => None,
+            Value::String(s) => Some(format!("{k}={s}")),
+            v => Some(format!("{k}={v}")),
+        })
+        .collect()
 }
 
 /// Merge decisions for several commands: any block blocks, messages concatenate.
@@ -241,6 +266,16 @@ mod tests {
             ["git -C /tmp status"]
         );
         assert!(cmds("rtk proxy").is_empty());
+    }
+
+    #[test]
+    fn other_tools_become_tool_events_with_key_value_args() {
+        let hook = json!({"hook_event_name": "PreToolUse", "tool_name": "Agent", "cwd": "/",
+            "tool_input": {"prompt": "a\nb", "isolation": "worktree", "name": "", "n": 2, "x": null}});
+        let (_, evs) = events(&hook, BTreeMap::new()).unwrap();
+        assert_eq!(evs[0].phase, Phase::Tool);
+        assert_eq!(evs[0].tool.as_deref(), Some("Agent"));
+        assert_eq!(evs[0].args, ["isolation=worktree", "n=2", "prompt=a\nb"]);
     }
 
     #[test]
