@@ -72,17 +72,27 @@ do    = { wrap = ["devenv", "shell", "--no-tui", "--"] }
 
 (`examples/config.toml` is this file.)
 
-- **Phases:** `pre`, `post`, `notfound`, `chpwd`, `prompt`, `session_start`, `sandbox`.
+- **Phases:** `pre`, `post`, `notfound`, `chpwd`, `prompt`, `session_start`, `sandbox`,
+  and `tool` (an agent's own tool call, such as Claude Code's `Agent`; its input
+  fields arrive as `key=value` arguments; see `docs/protocol.md`).
 - **Matching:** `tool`, `sub` (the first subcommand is one of these) and
   `args_start` (the positional arguments start with these). Global flags such
-  as `git -C path` are skipped.
+  as `git -C path` are skipped. `args_has` matches any raw argument, flags
+  included (`--cdp` also matches `--cdp=9222`), for tools whose global flags take
+  values, where `sub` can be fooled by a flag's value. `args_lacks` is its
+  opposite: no argument is one of these.
 - **Conditions** (all must hold): `root_has`, `env_set`, `env_unset`,
-  `command_missing`, `agent` (true or false), and `git = "root_off_default" | "in_repo" | "linked_worktree"`.
+  `command_missing`, `path_missing` (`~/` is your home), `agent` (true or false), and `git = "root_off_default" | "in_repo" | "linked_worktree"`.
   A fixed set of named checks, no scripting, so a rules file is safe to read.
   Git state is read from `.git` directly; no `git` process runs.
 - **Actions:** `hint`, `warn`, `block`, `wrap`, `set_env`, and for the sandbox
   phase `deny_write`, `allow_write`, `lock_write`. Messages and paths can use
   `{branch}`, `{default}`, `{root}` and `{main_root}`.
+- **`run`** asks a tool for its own report: `do = { run = [argv], each =
+  "...", timeout_ms = 5000 }` runs the argv in the event's cwd and adds one
+  warning per item of the JSON array it prints. In `each`, `{field}` is the
+  item's field and a `[...]` part is dropped unless all its fields are present.
+  A missing program, a non-zero exit, a timeout or other output adds nothing.
 - **Agents:** a caller is an agent when `AGENT` or `CLAUDECODE` is set in its
   environment. Set `AGENT=1` for anything else.
 
@@ -102,6 +112,9 @@ Agent shells often skip your rc files, so the shell glue never runs there.
 
 - **`SessionStart`** becomes a `session_start` event; messages go to the agent as
   context (and to you as a notice).
+- **`PreToolUse` on any other tool** becomes one `tool` event named after the
+  tool, its input as `key=value` arguments. Add a `PreToolUse` entry with no
+  matcher (or `"Agent|EnterWorktree"`) to send those calls too.
 - **`PreToolUse` on `Bash`** is split into its simple commands (`cd x && git
   commit` is two) and each becomes a `pre` event. A `block` denies the call and
   the reason is shown to the agent; a `hint` or `warn` is added as context and
@@ -114,8 +127,12 @@ Agent shells often skip your rc files, so the shell glue never runs there.
 
 ## Codex
 
-`trapline agent codex` handles Codex `SessionStart` and shell `PreToolUse`
-events, including canonical `Bash` and unified-exec `cmd` payloads. It recognizes
+Codex hooks send the same payload and read the same response as Claude Code
+(`hookSpecificOutput` with `additionalContext`, or `permissionDecision: "deny"`
+and `permissionDecisionReason`), so `trapline agent codex` and `trapline agent
+claude` are one implementation. It handles `SessionStart` and `PreToolUse`,
+including canonical `Bash` and unified-exec `cmd` payloads; other tools become
+`tool` events, as for Claude Code. It recognizes
 `rtk git ...` and `rtk proxy git ...` without changing the command. Explicit
 unified-exec workdirs are used when evaluating the command's repository context.
 Unsupported tools and malformed events produce no decision.
@@ -159,7 +176,8 @@ the compiled output equals the binary's in each scenario.
 
 The same rules can produce an enforced boundary. In the `sandbox` phase a rule
 returns `deny_write`, `allow_write` and `lock_write` paths (a later tier wins
-over an earlier one). The `git` pack makes a repo's own checkout read-only,
+over an earlier one), `deny_read` paths (`~/` expands to your home directory),
+and `allow_domains`. The `git` pack makes a repo's own checkout read-only,
 keeps its `.git` writable so worktrees can commit, locks the checkout's own
 `HEAD` and `index` so its branch cannot be switched, and keeps the current
 worktree writable.
@@ -168,16 +186,52 @@ worktree writable.
 trapline run --profile agent -- claude                      # rules + sandbox, then exec
 sandbox-exec -p "$(trapline sandbox seatbelt)" claude      # macOS, by hand
 trapline sandbox bwrap                                      # Linux: argv, one per line
+trapline sandbox claude-settings                            # JSON for Claude Code's `sandbox` setting
+trapline sandbox runtime > srt.json                         # for `srt --settings srt.json -- cmd`
 ```
 
 `run` points `TRAPLINE_CONFIG` at `<config dir>/<profile>.toml`, wraps the command
 in `sandbox-exec` (macOS) or `bwrap` (Linux), and execs it. `--no-sandbox` sets
 only the profile.
 
-Verified on macOS, including `claude -p` run through `trapline run`: writes in a linked worktree and commits from it work; writes
-to the root checkout and a branch switch there are denied. Not tested against
-Claude Code's own sandbox setting, and `sandbox-exec` cannot nest in another
-sandbox.
+One rule set, four targets. What each can express:
+
+| | Seatbelt | bwrap | Claude Code `sandbox` | sandbox-runtime |
+|---|---|---|---|---|
+| write allow / deny | yes | yes | `filesystem.allowWrite` / `denyWrite` | `filesystem.allowWrite` / `denyWrite` |
+| `lock_write` (root's `HEAD`, `index`) | yes | yes | yes, as `denyWrite` | yes, as `denyWrite` |
+| deny inside a deny, carve-out (`.git` inside the denied root) | yes | yes | no: a deny beats an allow | no: a deny beats an allow |
+| `deny_read` | yes | yes (dir: tmpfs, file: `/dev/null`) | `filesystem.denyRead` | `filesystem.denyRead` |
+| `allow_domains` | no, a comment says so | no, ignored | `network.allowedDomains` | `network.allowedDomains` |
+
+The two JSON targets are allow-list models where a deny wins over an allow, so
+the generator drops a deny that holds an allowed path (the root checkout holds
+its `.git`) and relies on the allow-list leaving it read-only. Run from a linked
+worktree that gives the same protection as Seatbelt: only the worktree and the
+root's `.git` are writable, and `HEAD` and `index` are locked. Run from the root
+checkout itself nothing allows the cwd, so the deny is kept and `.git` goes
+read-only too. Claude Code always allows its cwd for writes, so there the deny is
+what protects the root. `claude-settings` omits `network` when no rule names a
+domain (Claude Code prompts for unlisted hosts); `runtime` always lists
+`allowedDomains`, empty if none, because the runtime denies all network unless
+hosts are listed. `runtime` also adds the cwd to `allowWrite` (it allows no writes
+otherwise), except when the cwd is denied.
+
+Field names were checked against the Claude Code sandboxing docs and the
+sandbox-runtime README: `sandbox.enabled`, `sandbox.filesystem.{allowWrite,denyWrite,denyRead}`,
+`sandbox.network.allowedDomains`, and for the runtime `filesystem.{allowWrite,denyWrite,denyRead}`
+and `network.allowedDomains`. Not emitted: `allowRead`, `deniedDomains`, Claude
+Code's `credentials`, and anything under `excludedCommands`. A path that does not
+exist yet gets no protection on Linux in either JSON target, so `.git/index` of a
+fresh repo is not locked until it exists.
+
+Verified on macOS, including `claude -p` run through `trapline run` and a
+`deny_read` file that `cat` cannot open: writes in a linked worktree and commits
+from it work; writes to the root checkout and a branch switch there are denied.
+The JSON targets were checked for shape and content only, not run through Claude
+Code or `srt`. `bwrap` output is generated but untested on Linux (including the
+`--tmpfs` and `/dev/null` read hiding). `sandbox-exec` cannot nest in another
+sandbox, so under Claude Code's own sandbox use `claude-settings` instead.
 
 ## Plugins
 
@@ -209,9 +263,32 @@ Three extension points, none of which need a change to trapline:
 | Pack | What it does |
 |---|---|
 | `devenv` | Prompt markers (`⬡ devenv` inside, `⬡ off` in a devenv repo you have not entered); a not-found hint pointing at `dev`. |
-| `git` | In a root checkout off the default branch, `commit`/`push`/`add`/`merge`/`rebase` warn (firmer wording for an agent) and never block. Raw `git worktree add` warns a human and blocks an agent, and points at `wt`. |
+| `git` | In a root checkout off the default branch, `commit`/`push`/`add`/`merge`/`rebase` warn (firmer wording for an agent) and never block. Raw `git worktree add` warns a human and blocks an agent, and points at `wt`. Claude Code's `Agent` with `isolation: "worktree"` is blocked, and so is `EnterWorktree name=` without `path=` when the worktrunk plugin (`~/.claude/plugins/cache/worktrunk`) is not installed. |
 | `devenv-agent` | Agent-only: at session start, tells the agent the repo has a devenv and how to use it. Quiet in repos without a `devenv.nix`. |
-| `wt` | `wt switch` warns when `devenv` is not on `PATH` (the post-switch warm-up would be skipped). `wt remove` reminds an agent to check unpushed work. |
+| `agent-browser` | Agent-only, for [agent-browser](https://agent-browser.dev): blocks the `eval`-category actions (page scripts can undo its domain allowlist), and `--cdp`, `--auto-connect`, `--profile`, `--restore`, `--state` and `state load` (they attach to an existing browser, so `--allowed-domains` cannot apply). Each block says the command to use instead. |
+| `agent-browser-strict` | Opt-in, with `agent-browser`: blocks an agent's `open` until `AGENT_BROWSER_ALLOWED_DOMAINS` is set in its environment. |
+| `wt` | `wt switch` warns when `devenv` is not on `PATH` (the post-switch warm-up would be skipped). `wt remove` reminds an agent to check unpushed work. At session start, lists `wt step doctor` findings, one line each with its fix (needs a `wt` that has `step doctor --format=json`). |
+
+### Allowed domains for `agent-browser`
+The packs do not know your domains; agent-browser enforces its allowlist
+(`--allowed-domains`, `AGENT_BROWSER_ALLOWED_DOMAINS`, or `allowedDomains` in
+`~/.agent-browser/config.json`, per its security docs). Set it where the agent
+starts. To have trapline require it, add `agent-browser-strict` to `use`, or
+write your own rule with the existing keys, for example:
+
+```toml
+[[rule]]
+id = "browser-no-upload"
+tool = ["agent-browser"]
+args_has = ["upload"]
+phase = "pre"
+when = { agent = true }
+do = { warn = "uploads are blocked for agents; ask the user to do it", block = true }
+```
+
+Not covered: whether an `--allowed-domains` flag is present on the same command
+(rules cannot test for a missing flag), and agent-browser run through a wrapper
+such as `npx`.
 
 ## Status
 

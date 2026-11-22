@@ -1,0 +1,14 @@
+# agent-browser, stricter: an agent may only open pages once a domain allowlist is
+# configured in its environment. Use it with `agent-browser`. Opt-in because it
+# cannot see an `--allowed-domains` flag on the same command (rules read the
+# environment, not flag values): set the allowlist where the agent starts, either
+# AGENT_BROWSER_ALLOWED_DOMAINS or `allowedDomains` in ~/.agent-browser/config.json
+# (and then export AGENT_BROWSER_ALLOWED_DOMAINS too, which is what this checks).
+
+[[rule]]
+id = "agent-browser-open-needs-allowlist"
+tool = ["agent-browser"]
+args_has = ["open"]
+phase = "pre"
+when = { agent = true, env_unset = "AGENT_BROWSER_ALLOWED_DOMAINS" }
+do = { warn = "no domain allowlist: AGENT_BROWSER_ALLOWED_DOMAINS is not set. Ask the user to set it (comma-separated, e.g. 'example.com,*.example.com,cdn.example.com'; include CDN hosts or pages break), then retry.", block = true }

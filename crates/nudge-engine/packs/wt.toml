@@ -15,3 +15,13 @@ args_start = ["remove"]
 phase = "pre"
 when = { agent = true }
 do = { hint = "removing deletes the branch if merged; check unpushed and uncommitted work first (wt list)" }
+
+# At session start, report what `wt step doctor` finds (stale entries, nested or
+# stray worktrees, a root off its default branch...), one line per finding with
+# its fix. Needs a wt with `step doctor --format=json`; silent with an older wt,
+# no wt, no findings, or outside a repo.
+[[rule]]
+id = "wt-session-doctor"
+phase = "session_start"
+when = { git = "in_repo" }
+do = { run = ["wt", "step", "doctor", "--format=json"], each = "wt step doctor: {kind}[ @ {path}][ ({branch})][: {detail}][; run {fix}]", timeout_ms = 5000 }

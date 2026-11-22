@@ -24,6 +24,9 @@ pub enum Phase {
     SessionStart,
     /// Asking which filesystem limits a sandbox should apply for `cwd`.
     Sandbox,
+    /// An agent is about to call one of its own tools (not a shell command):
+    /// `tool` is the tool's name and `args` its input as `key=value`.
+    Tool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +90,13 @@ pub struct Fs {
     pub allow_write: Vec<String>,
     #[serde(default)]
     pub lock_write: Vec<String>,
+    /// Paths a sandbox should hide from reads.
+    #[serde(default)]
+    pub deny_read: Vec<String>,
+    /// Hosts the sandboxed command may reach. Targets that cannot filter by
+    /// domain ignore it.
+    #[serde(default)]
+    pub allow_domains: Vec<String>,
 }
 
 fn yes() -> bool {
@@ -106,6 +116,8 @@ impl Decision {
         self.fs.deny_write.extend(o.fs.deny_write);
         self.fs.allow_write.extend(o.fs.allow_write);
         self.fs.lock_write.extend(o.fs.lock_write);
+        self.fs.deny_read.extend(o.fs.deny_read);
+        self.fs.allow_domains.extend(o.fs.allow_domains);
         self.fired.extend(o.fired);
     }
 }

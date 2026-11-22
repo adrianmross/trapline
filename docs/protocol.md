@@ -17,9 +17,13 @@ stdout can be a handler. The types live in `trapline-core`.
 }
 ```
 
-`phase` is one of `pre`, `post`, `notfound`, `chpwd`, `prompt`, `session_start`, `sandbox`. `tool` and
+`phase` is one of `pre`, `post`, `notfound`, `chpwd`, `prompt`, `session_start`, `sandbox`, `tool`. `tool` and
 `args` describe the wrapped command (`tool` is the missing name for
-`notfound`). `rc` is set for `post`.
+`notfound`). `rc` is set for `post`. In `tool`, an agent is calling one of its
+own tools: `tool` is the tool's name and `args` are its input's top-level
+fields as `key=value` (strings bare, other values as JSON, null and empty
+strings left out), so `args_has = ["isolation=worktree"]` matches a value and
+`args_has = ["name"]` / `args_lacks = ["path"]` test whether a field is set.
 
 ## Decision
 
@@ -54,11 +58,18 @@ stdout can be a handler. The types live in `trapline-core`.
 
 `trapline agent claude` reads a Claude Code hook payload on stdin and prints the
 hook response on stdout (nothing when there is nothing to say; always exit 0).
+`trapline agent codex` is the same code: Codex sends the same payload and reads
+the same response. Shell calls named `exec_command`, `functions.exec_command`
+or `shell_command`, with the command in `cmd`, count as `Bash`, and an absolute
+`tool_input.workdir` replaces `cwd`. A `block` at `SessionStart` answers
+`{"continue": false, "stopReason": ...}`; a `wrap` is reported as context, never
+applied.
 
 | Hook | Becomes | Response |
 |---|---|---|
 | `SessionStart` | one `session_start` event | `additionalContext` (and `systemMessage`) with the messages |
 | `PreToolUse`, `Bash` | one `pre` event per simple command | `block` -> `permissionDecision: "deny"` with the reason; otherwise `additionalContext` only, so the permission flow is unchanged |
+| `PreToolUse`, any other tool | one `tool` event (`tool` = `tool_name`, `args` from `tool_input`) | as for `Bash` |
 | anything else | none | no output |
 
 ## Evaluating from your own code

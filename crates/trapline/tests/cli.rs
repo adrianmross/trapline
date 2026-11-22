@@ -186,6 +186,41 @@ fn agent_codex_reports_actual_activation_and_never_rewrites_wrappers() {
 }
 
 #[test]
+fn claude_and_codex_answer_documented_codex_payloads_the_same() {
+    let (d, cfg) = fixture("codex-docs", r#"use = ["git", "devenv-agent"]"#);
+    let common = serde_json::json!({"session_id": "s", "transcript_path": null,
+        "cwd": d, "model": "m", "permission_mode": "default"});
+    let with = |extra: serde_json::Value| {
+        let mut v = common.clone();
+        v.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        v.to_string()
+    };
+    let start = with(serde_json::json!({"hook_event_name": "SessionStart", "source": "startup"}));
+    let pre = with(
+        serde_json::json!({"hook_event_name": "PreToolUse", "turn_id": "t",
+        "tool_name": "Bash", "tool_use_id": "u",
+        "tool_input": {"command": "git worktree add ../x"}}),
+    );
+    for hook in [start, pre] {
+        let (_, codex) = agent_call(&cfg, &hook, "codex", None);
+        assert_eq!(codex, agent_call(&cfg, &hook, "claude", None).1);
+        assert!(!codex.is_empty(), "{hook}");
+    }
+    let (_, out) = agent_call(
+        &cfg,
+        &with(serde_json::json!({"hook_event_name": "PreToolUse",
+        "tool_name": "Bash", "tool_input": {"command": "git worktree add ../x"}})),
+        "codex",
+        None,
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+    assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+}
+
+#[test]
 fn agent_claude_denies_raw_worktree_add_inside_a_compound_command() {
     let (d, cfg) = fixture("agent-deny", r#"use = ["git"]"#);
     let hook = format!(
@@ -200,6 +235,16 @@ fn agent_claude_denies_raw_worktree_add_inside_a_compound_command() {
         .as_str()
         .unwrap()
         .contains("wt switch"));
+    let agent = serde_json::json!({"hook_event_name":"PreToolUse", "tool_name":"Agent",
+        "cwd": d, "tool_input":{"prompt":"go", "isolation":"worktree"}})
+    .to_string();
+    let (_, out) = agent_claude(&cfg, &agent);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert!(v["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap()
+        .contains("--no-cd --no-hooks"));
 }
 
 #[test]
@@ -546,12 +591,13 @@ fn compiled_pre_matches_the_binary_across_repo_states() {
     if !have("zsh") || !have("git") {
         return;
     }
-    let cfg_dir = std::env::temp_dir().join(format!("trapline-pre-{}", std::process::id()));
+    let cfg_dir =
+        std::env::temp_dir().join(format!("trapline-compiled-pre-{}", std::process::id()));
     fs::create_dir_all(&cfg_dir).unwrap();
     let cfg = cfg_dir.join("config.toml");
     fs::write(
         &cfg,
-        r#"use = ["git", "wt"]
+        r#"use = ["git", "wt", "agent-browser", "agent-browser-strict"]
 [[rule]]
 id = "nvim"
 tool = ["nvim"]
@@ -616,6 +662,13 @@ do = { wrap = ["devenv", "shell", "--no-tui", "--"] }
                 "wt remove y",
                 "nvim file",
                 "ls",
+                "agent-browser eval document.title",
+                "agent-browser --action-policy p.json eval 1",
+                "agent-browser --cdp=9222 snapshot",
+                "agent-browser --profile /tmp/p open https://a.com",
+                "agent-browser state load s.json",
+                "agent-browser open https://a.com",
+                "agent-browser snapshot",
             ] {
                 let a = pre_scenario(&cfg, cwd, true, agent, argv);
                 let b = pre_scenario(&cfg, cwd, false, agent, argv);
@@ -630,6 +683,15 @@ do = { wrap = ["devenv", "shell", "--no-tui", "--"] }
         "{hit}"
     );
     assert!(pre_scenario(&cfg, &on_main, true, true, "git worktree add x").contains("rc=1"));
+    let cdp = pre_scenario(
+        &cfg,
+        &plain,
+        true,
+        true,
+        "agent-browser --cdp=9222 snapshot",
+    );
+    assert!(cdp.contains("rc=1"), "{cdp}");
+    assert!(pre_scenario(&cfg, &plain, true, true, "agent-browser snapshot").contains("rc=0"));
 }
 
 #[test]
@@ -653,5 +715,118 @@ fn wrapper_still_runs_the_tool_when_the_helpers_are_gone() {
         out.stderr.is_empty(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn sandbox_out(cfg: &Path, kind: &str, cwd: &Path) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_trapline"))
+        .env("TRAPLINE_CONFIG", cfg)
+        .args(["sandbox", kind, "--cwd"])
+        .arg(cwd)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+const HIDE_RULE: &str = r#"use = ["git"]
+[[rule]]
+id = "hide"
+phase = "sandbox"
+do = { deny_read = ["{root}/sec"], allow_domains = ["github.com"] }
+"#;
+
+#[test]
+fn every_sandbox_target_comes_from_the_same_rules() {
+    if !have("git") {
+        return;
+    }
+    let repo = git_repo("targets");
+    fs::create_dir_all(repo.join("sec")).unwrap();
+    let (_, cfg) = fixture("targets", HIDE_RULE);
+    let r = repo.display().to_string();
+
+    let seatbelt = sandbox_out(&cfg, "seatbelt", &repo);
+    assert!(seatbelt.contains(&format!("(deny file-read* (subpath \"{r}/sec\"))")));
+    assert!(seatbelt.contains("; allow_domains is not enforced"));
+
+    let bwrap = sandbox_out(&cfg, "bwrap", &repo);
+    assert!(bwrap.contains(&format!("--tmpfs\n{r}/sec\n")), "{bwrap}");
+
+    // Run from the root checkout: nothing allows the cwd, so the root is denied
+    // (and with it `.git`), and the runtime does not add the cwd to allowWrite.
+    let v: serde_json::Value =
+        serde_json::from_str(&sandbox_out(&cfg, "claude-settings", &repo)).unwrap();
+    let s = &v["sandbox"];
+    assert_eq!(s["enabled"], true);
+    assert_eq!(
+        s["filesystem"]["denyRead"],
+        serde_json::json!([format!("{r}/sec")])
+    );
+    let deny = s["filesystem"]["denyWrite"].as_array().unwrap();
+    for p in [&r, &format!("{r}/.git/HEAD"), &format!("{r}/.git/index")] {
+        assert!(deny.contains(&serde_json::json!(p)), "{deny:?}");
+    }
+    assert_eq!(
+        s["network"]["allowedDomains"],
+        serde_json::json!(["github.com"])
+    );
+
+    let rt: serde_json::Value = serde_json::from_str(&sandbox_out(&cfg, "runtime", &repo)).unwrap();
+    assert!(rt.get("sandbox").is_none());
+    assert!(!rt["filesystem"]["allowWrite"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(r)));
+    assert_eq!(
+        rt["network"]["allowedDomains"],
+        serde_json::json!(["github.com"])
+    );
+
+    // No domain rule: Claude Code gets no `network` key (it prompts), the
+    // runtime gets an explicit empty list (it denies everything).
+    let (_, plain) = fixture("targets-plain", r#"use = ["git"]"#);
+    let v: serde_json::Value =
+        serde_json::from_str(&sandbox_out(&plain, "claude-settings", &repo)).unwrap();
+    assert!(v["sandbox"].get("network").is_none());
+    let rt: serde_json::Value =
+        serde_json::from_str(&sandbox_out(&plain, "runtime", &repo)).unwrap();
+    assert_eq!(rt["network"]["allowedDomains"], serde_json::json!([]));
+}
+
+#[test]
+fn deny_read_really_hides_a_file_on_macos() {
+    if !cfg!(target_os = "macos") || !have("sandbox-exec") || !have("git") {
+        return;
+    }
+    let works = Command::new("sandbox-exec")
+        .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !works {
+        return;
+    }
+    let repo = git_repo("hide");
+    fs::create_dir_all(repo.join("sec")).unwrap();
+    fs::write(repo.join("sec/key"), "secret").unwrap();
+    fs::write(repo.join("open.txt"), "fine").unwrap();
+    let (_, cfg) = fixture("hide", HIDE_RULE);
+    let profile = sandbox_out(&cfg, "seatbelt", &repo);
+    let cat = |f: &str| {
+        Command::new("sandbox-exec")
+            .args(["-p", &profile, "/bin/cat"])
+            .arg(repo.join(f))
+            .output()
+            .unwrap()
+    };
+    assert!(cat("open.txt").status.success());
+    assert!(
+        !cat("sec/key").status.success(),
+        "sec/key must be unreadable"
     );
 }

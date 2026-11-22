@@ -16,6 +16,8 @@ const HANDOFF_PACK: &str = include_str!("../packs/handoff.toml");
 const DEVENV_PACK: &str = include_str!("../packs/devenv.toml");
 const GIT_PACK: &str = include_str!("../packs/git.toml");
 const WT_PACK: &str = include_str!("../packs/wt.toml");
+const AGENT_BROWSER_PACK: &str = include_str!("../packs/agent-browser.toml");
+const AGENT_BROWSER_STRICT_PACK: &str = include_str!("../packs/agent-browser-strict.toml");
 const DEVENV_AGENT_PACK: &str = include_str!("../packs/devenv-agent.toml");
 
 /// Env vars that mark the caller as an agent. `AGENT=1` is the generic switch.
@@ -68,11 +70,21 @@ pub fn builtin_pack(name: &str) -> Option<&'static str> {
         "git" => Some(GIT_PACK),
         "wt" => Some(WT_PACK),
         "devenv-agent" => Some(DEVENV_AGENT_PACK),
+        "agent-browser" => Some(AGENT_BROWSER_PACK),
+        "agent-browser-strict" => Some(AGENT_BROWSER_STRICT_PACK),
         _ => None,
     }
 }
 
-pub const BUILTIN_PACKS: &[&str] = &["devenv", "devenv-agent", "git", "wt", "handoff"];
+pub const BUILTIN_PACKS: &[&str] = &[
+    "devenv",
+    "devenv-agent",
+    "git",
+    "wt",
+    "handoff",
+    "agent-browser",
+    "agent-browser-strict",
+];
 
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {
@@ -117,6 +129,13 @@ pub struct Rule {
     /// The positional arguments start with these (after global flags).
     #[serde(default)]
     pub args_start: Vec<String>,
+    /// Any argument is one of these, or `<one>=...`. Unlike `sub`, flags count,
+    /// and a flag's value cannot hide the match.
+    #[serde(default)]
+    pub args_has: Vec<String>,
+    /// No argument is one of these, or `<one>=...`.
+    #[serde(default)]
+    pub args_lacks: Vec<String>,
     pub phase: Phase,
     #[serde(default)]
     pub when: When,
@@ -136,6 +155,8 @@ pub struct When {
     pub agent: Option<bool>,
     /// This command is not found on `$PATH`.
     pub command_missing: Option<String>,
+    /// Nothing exists at this path (`~/` is the event's `$HOME`).
+    pub path_missing: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -169,6 +190,23 @@ pub struct Action {
     /// Sandbox phase: paths that stay read-only even inside an allowed tree.
     #[serde(default)]
     pub lock_write: Vec<String>,
+    /// Sandbox phase: paths to hide from reads. `~/` expands to the home dir.
+    #[serde(default)]
+    pub deny_read: Vec<String>,
+    /// Sandbox phase: hosts the sandboxed command may reach.
+    #[serde(default)]
+    pub allow_domains: Vec<String>,
+    /// Run this argv in the event's cwd and add one warning per item of the
+    /// JSON array it prints, formatted by `each`. A missing program, a
+    /// non-zero exit, a timeout or output that is not an array adds nothing.
+    #[serde(default)]
+    pub run: Vec<String>,
+    /// Message for each item: `{field}` is the item's field (empty if absent),
+    /// and a `[...]` part is dropped unless every field in it is present.
+    #[serde(default)]
+    pub each: String,
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
 }
 
 pub struct Engine {
@@ -245,8 +283,23 @@ impl Engine {
         if !rule.args_start.is_empty() && !pos.starts_with(&rule.args_start) {
             return Some(format!("arguments do not start with {:?}", rule.args_start));
         }
+        let has = |names: &[String]| {
+            ev.args.iter().any(|a| {
+                names.iter().any(|f| {
+                    a == f
+                        || a.strip_prefix(f.as_str())
+                            .is_some_and(|r| r.starts_with('='))
+                })
+            })
+        };
+        if !rule.args_has.is_empty() && !has(&rule.args_has) {
+            return Some(format!("no argument is one of {:?}", rule.args_has));
+        }
+        if has(&rule.args_lacks) {
+            return Some(format!("an argument is one of {:?}", rule.args_lacks));
+        }
         let w = &rule.when;
-        let checks: [(bool, String); 6] = [
+        let checks: [(bool, String); 7] = [
             (
                 w.root_has.as_deref().is_none_or(|f| root_has(&ev.cwd, f)),
                 format!("no {} at or above cwd", w.root_has.as_deref().unwrap_or("")),
@@ -277,6 +330,12 @@ impl Engine {
                     .as_deref()
                     .is_none_or(|c| !on_path(&ev.env, c)),
                 format!("{} is on PATH", w.command_missing.as_deref().unwrap_or("")),
+            ),
+            (
+                w.path_missing
+                    .as_deref()
+                    .is_none_or(|p| !expand_home(&ev.env, p).exists()),
+                format!("{} exists", w.path_missing.as_deref().unwrap_or("")),
             ),
             (
                 w.git.is_none_or(|g| match g {
@@ -313,6 +372,14 @@ fn root_has(cwd: &Path, file: &str) -> bool {
 
 fn is_agent(env: &BTreeMap<String, String>) -> bool {
     AGENT_VARS.iter().any(|k| env.contains_key(*k))
+}
+
+/// `~/x` under the event's `$HOME`; other paths as written.
+fn expand_home(env: &BTreeMap<String, String>, p: &str) -> PathBuf {
+    match (p.strip_prefix("~/"), env.get("HOME")) {
+        (Some(rest), Some(home)) => Path::new(home).join(rest),
+        _ => PathBuf::from(p),
+    }
 }
 
 fn on_path(env: &BTreeMap<String, String>, cmd: &str) -> bool {
@@ -521,6 +588,9 @@ impl Engine {
                 || !a.deny_write.is_empty()
                 || !a.allow_write.is_empty()
                 || !a.lock_write.is_empty()
+                || !a.deny_read.is_empty()
+                || !a.allow_domains.is_empty()
+                || !a.run.is_empty()
             {
                 return None;
             }
@@ -537,6 +607,20 @@ impl Engine {
                 }
                 conds.push(format!("[[ ${{pos[1]}} == ({}) ]]", r.sub.join("|")));
             }
+            if !r.args_has.is_empty() {
+                if !r.args_has.iter().all(|t| word(t)) {
+                    return None;
+                }
+                let pat: Vec<String> = r.args_has.iter().map(|f| format!("{f}|{f}=*")).collect();
+                conds.push(format!("(( ${{#${{(M)@:#({})}}}} ))", pat.join("|")));
+            }
+            if !r.args_lacks.is_empty() {
+                if !r.args_lacks.iter().all(|t| word(t)) {
+                    return None;
+                }
+                let pat: Vec<String> = r.args_lacks.iter().map(|f| format!("{f}|{f}=*")).collect();
+                conds.push(format!("(( ! ${{#${{(M)@:#({})}}}} ))", pat.join("|")));
+            }
             for (i, want) in r.args_start.iter().enumerate() {
                 if !word(want) {
                     return None;
@@ -544,6 +628,9 @@ impl Engine {
                 conds.push(format!("[[ ${{pos[{}]}} == {} ]]", i + 1, zq(want)));
             }
             let w = &r.when;
+            if w.path_missing.is_some() {
+                return None;
+            }
             if let Some(f) = &w.root_has {
                 conds.push(format!("_trapline_root_has {}", zq(f)));
             }
@@ -670,7 +757,11 @@ impl Engine {
                 conds.push(format!("[[ $1 == ({}) ]]", r.tool.join("|")));
             }
             let w = &r.when;
-            if w.git.is_some() {
+            if w.git.is_some()
+                || w.path_missing.is_some()
+                || !r.action.run.is_empty()
+                || !r.args_lacks.is_empty()
+            {
                 return None;
             }
             if let Some(f) = &w.root_has {
@@ -781,6 +872,16 @@ impl Handler for Engine {
                 .extend(a.allow_write.iter().map(|p| fill(p, &ev.cwd)));
             d.fs.lock_write
                 .extend(a.lock_write.iter().map(|p| fill(p, &ev.cwd)));
+            d.fs.deny_read
+                .extend(a.deny_read.iter().map(|p| fill(p, &ev.cwd)));
+            d.fs.allow_domains.extend(a.allow_domains.iter().cloned());
+            if !a.run.is_empty() {
+                d.messages
+                    .extend(run_each(a, ev).into_iter().map(|text| Message {
+                        level: Level::Warn,
+                        text,
+                    }));
+            }
         }
         for h in self.handlers.iter().filter(|h| {
             (h.phase.is_empty() || h.phase.contains(&ev.phase))
@@ -805,18 +906,36 @@ impl Handler for Engine {
 /// Run an external handler: Event JSON on stdin, Decision JSON on stdout,
 /// killed after `timeout_ms`.
 fn run_handler(h: &HandlerCfg, ev: &Event) -> Result<Decision, String> {
-    let (prog, args) = h.command.split_first().ok_or("empty command")?;
-    let mut child = Command::new(prog)
-        .args(args)
+    let payload = serde_json::to_vec(ev).map_err(|e| e.to_string())?;
+    let out = run_cmd(&h.command, &payload, h.timeout_ms, None, None)?;
+    serde_json::from_slice(&out).map_err(|e| format!("bad decision JSON: {e}"))
+}
+
+/// Run `argv` with `stdin`, killed after `timeout_ms`; its stdout on success.
+/// `path` replaces `$PATH` for finding and running the program.
+fn run_cmd(
+    argv: &[String],
+    stdin: &[u8],
+    timeout_ms: u64,
+    cwd: Option<&Path>,
+    path: Option<&String>,
+) -> Result<Vec<u8>, String> {
+    let (prog, args) = argv.split_first().ok_or("empty command")?;
+    let mut cmd = Command::new(prog);
+    cmd.args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("{prog}: {e}"))?;
-    let payload = serde_json::to_vec(ev).map_err(|e| e.to_string())?;
-    // A handler that exits without reading is fine; ignore the broken pipe.
-    let _ = child.stdin.take().ok_or("no stdin")?.write_all(&payload);
-    let deadline = Instant::now() + Duration::from_millis(h.timeout_ms);
+        .stderr(Stdio::null());
+    if let Some(d) = cwd {
+        cmd.current_dir(d);
+    }
+    if let Some(p) = path {
+        cmd.env("PATH", p);
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("{prog}: {e}"))?;
+    // A program that exits without reading is fine; ignore the broken pipe.
+    let _ = child.stdin.take().ok_or("no stdin")?.write_all(stdin);
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
         match child.try_wait().map_err(|e| e.to_string())? {
             Some(status) if !status.success() => return Err(format!("exited with {status}")),
@@ -824,13 +943,75 @@ fn run_handler(h: &HandlerCfg, ev: &Event) -> Result<Decision, String> {
             None if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("timed out after {}ms", h.timeout_ms));
+                return Err(format!("timed out after {timeout_ms}ms"));
             }
             None => std::thread::sleep(Duration::from_millis(2)),
         }
     }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    serde_json::from_slice(&out.stdout).map_err(|e| format!("bad decision JSON: {e}"))
+    // ponytail: stdout is read after exit, so a program printing more than a
+    // pipe buffer (~64 KiB) stalls until the timeout; read it on a thread if
+    // that ever matters.
+    Ok(child.wait_with_output().map_err(|e| e.to_string())?.stdout)
+}
+
+/// A rule's `run` action: one message per item of the JSON array the command
+/// prints. Any failure is silent, so a missing tool costs nothing.
+fn run_each(a: &Action, ev: &Event) -> Vec<String> {
+    let cwd = ev.cwd.is_dir().then_some(ev.cwd.as_path());
+    // The event's PATH, as `command_missing` reads it.
+    let Ok(out) = run_cmd(&a.run, b"", a.timeout_ms, cwd, ev.env.get("PATH")) else {
+        return vec![];
+    };
+    let Ok(items) = serde_json::from_slice::<Vec<serde_json::Value>>(&out) else {
+        return vec![];
+    };
+    items.iter().map(|item| fill_item(&a.each, item)).collect()
+}
+
+/// `{field}` from a JSON object (strings bare with lines joined by `; `, so a
+/// message stays one line; other values as JSON; absent or null as empty). A
+/// `[...]` part is kept only if every field in it is present.
+fn fill_item(template: &str, item: &serde_json::Value) -> String {
+    let field = |name: &str| match item.get(name) {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => Some(s.lines().collect::<Vec<_>>().join("; ")),
+        Some(v) => Some(v.to_string()),
+    };
+    // (text, every field present) for the outer text and the open `[...]` part.
+    let mut out = String::new();
+    let mut part: Option<(String, bool)> = None;
+    let mut rest = template;
+    while let Some(c) = rest.chars().next() {
+        rest = &rest[c.len_utf8()..];
+        match c {
+            '[' if part.is_none() => part = Some((String::new(), true)),
+            ']' if part.is_some() => {
+                if let Some((text, true)) = part.take() {
+                    out.push_str(&text);
+                }
+            }
+            '{' if rest.contains('}') => {
+                let (name, after) = rest.split_once('}').unwrap();
+                rest = after;
+                let v = field(name);
+                match &mut part {
+                    Some((text, all)) => {
+                        *all &= v.is_some();
+                        text.push_str(&v.unwrap_or_default());
+                    }
+                    None => out.push_str(&v.unwrap_or_default()),
+                }
+            }
+            c => match &mut part {
+                Some((text, _)) => text.push(c),
+                None => out.push(c),
+            },
+        }
+    }
+    if let Some((text, true)) = part {
+        out.push_str(&text);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -967,6 +1148,97 @@ mod tests {
         assert!(!w.proceed);
         let h = e.handle(&git_ev(&["worktree", "add", "../x"], &linked, &[]));
         assert!(h.proceed && h.messages.len() == 1);
+    }
+
+    #[test]
+    fn wt_pack_reports_doctor_findings_and_stays_quiet_otherwise() {
+        use std::os::unix::fs::PermissionsExt;
+        let e = Engine::from_toml(r#"use = ["wt"]"#).unwrap();
+        let cwd = git_repo("doctor", "main");
+        let bin = cwd.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let start = |script: &str| {
+            let wt = bin.join("wt");
+            fs::write(&wt, format!("#!/bin/sh\n{script}\n")).unwrap();
+            fs::set_permissions(&wt, fs::Permissions::from_mode(0o755)).unwrap();
+            let path = format!("{}:/usr/bin:/bin", bin.display());
+            e.handle(&ev(Phase::SessionStart, None, &cwd, &[("PATH", &path)]))
+        };
+        let d = start(
+            r#"[ "$*" = "step doctor --format=json" ] && [ -d .git ] || exit 9
+echo '[{"kind":"nested_worktree","path":"/r/x","fix":"wt step relocate"},
+{"kind":"root_branch","path":"/r","branch":"feat","detail":"main"}]'"#,
+        );
+        let texts: Vec<&str> = d.messages.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "wt step doctor: nested_worktree @ /r/x; run wt step relocate",
+                "wt step doctor: root_branch @ /r (feat): main",
+            ]
+        );
+        assert!(d.proceed);
+        for quiet in ["echo '[]'", "exit 2", "echo nope"] {
+            assert!(start(quiet).messages.is_empty(), "{quiet}");
+        }
+        // No wt on PATH, or not in a repo: nothing, and nothing spawned.
+        let none = ev(Phase::SessionStart, None, &cwd, &[("PATH", "/nonexistent")]);
+        assert!(e.handle(&none).messages.is_empty());
+        let outside = ev(Phase::SessionStart, None, Path::new("/"), &[]);
+        assert_eq!(e.handle(&outside).fired, Vec::<String>::new());
+        // A `run` rule keeps its phase on the binary instead of compiling.
+        let c = Engine::from_toml(
+            r#"[[rule]]
+id = "r"
+phase = "notfound"
+do = { run = ["true"] }"#,
+        )
+        .unwrap();
+        assert!(!c.compile_zsh().contains("_trapline_notfound_hint"));
+        let slow = Engine::from_toml(
+            r#"[[rule]]
+id = "slow"
+phase = "session_start"
+do = { run = ["sleep", "5"], each = "x", timeout_ms = 100 }"#,
+        )
+        .unwrap();
+        let t = Instant::now();
+        assert!(slow.handle(&outside).messages.is_empty());
+        assert!(t.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn git_pack_blocks_claude_worktree_tools_that_bypass_wt() {
+        let e = Engine::from_toml(r#"use = ["git"]"#).unwrap();
+        // Tool rules never become shell wrappers.
+        assert!(!e.wrapped_tools().contains("Agent"));
+        let home = std::env::temp_dir().join(format!("nudge-home-{}", std::process::id()));
+        let call = |tool: &str, args: &[&str]| {
+            let mut ev = ev(
+                Phase::Tool,
+                Some(tool),
+                Path::new("/"),
+                &[("HOME", home.to_str().unwrap())],
+            );
+            ev.args = args.iter().map(|a| a.to_string()).collect();
+            e.handle(&ev)
+        };
+        assert!(!call("Agent", &["isolation=worktree", "prompt=x"]).proceed);
+        assert!(call("Agent", &["prompt=x"]).proceed);
+        let named = call("EnterWorktree", &["name=feat"]);
+        assert!(!named.proceed);
+        assert!(named.messages[0].text.contains("wt switch --create"));
+        assert!(call("EnterWorktree", &["name=feat", "path=/w"]).proceed);
+        assert!(call("EnterWorktree", &["path=/w"]).proceed);
+        fs::create_dir_all(home.join(".claude/plugins/cache/worktrunk")).unwrap();
+        assert!(call("EnterWorktree", &["name=feat"]).proceed);
+    }
+
+    #[test]
+    fn fill_item_drops_parts_with_missing_fields() {
+        let item = serde_json::json!({"a": "x\ny", "n": 3, "z": null});
+        assert_eq!(fill_item("{a}[ {b}][ {n}][ {z}]!", &item), "x; y 3!");
+        assert_eq!(fill_item("{b}-{n}", &item), "-3");
     }
 
     #[test]
@@ -1140,5 +1412,82 @@ do = { warn = "careful", block = true }"#,
         assert!(!d.proceed);
         assert_eq!(d.messages[0].text, "careful");
         assert!(Engine::from_toml(r#"use = ["nope"]"#).is_err());
+    }
+    fn ab(e: &Engine, agent: bool, env: &[(&str, &str)], args: &[&str]) -> Decision {
+        let mut env = env.to_vec();
+        if agent {
+            env.push(("CLAUDECODE", "1"));
+        }
+        let mut v = ev(Phase::Pre, Some("agent-browser"), Path::new("/"), &env);
+        v.args = args.iter().map(|a| a.to_string()).collect();
+        e.handle(&v)
+    }
+
+    #[test]
+    fn agent_browser_pack_blocks_what_steps_around_its_containment() {
+        let e = Engine::from_toml(r#"use = ["agent-browser"]"#).unwrap();
+        for args in [
+            &["eval", "document.title"][..],
+            &["--action-policy", "p.json", "eval", "1"], // a flag value in front
+            &["addinitscript", "x"],
+            &["--cdp", "9222", "snapshot"],
+            &["--cdp=9222", "snapshot"],
+            &["--auto-connect", "open", "https://a.com"],
+            &["--profile", "/tmp/p", "open", "https://a.com"],
+            &["state", "load", "s.json"],
+        ] {
+            let d = ab(&e, true, &[], args);
+            assert!(!d.proceed, "{args:?} should block an agent");
+            assert!(!d.messages.is_empty(), "{args:?} should say what to do");
+            assert!(
+                !ab(&e, false, &[], args)
+                    .fired
+                    .iter()
+                    .any(|f| f.starts_with("agent-browser")),
+                "{args:?} should not touch a human"
+            );
+        }
+        for args in [
+            &["open", "https://a.com"][..],
+            &[
+                "--allowed-domains",
+                "a.com,*.a.com",
+                "open",
+                "https://a.com",
+            ],
+            &["snapshot"],
+            &["click", "@e3"],
+            &["state", "save", "s.json"],
+        ] {
+            assert!(
+                ab(&e, true, &[], args).fired.is_empty(),
+                "{args:?} should pass"
+            );
+        }
+        let git = e.handle(&ev(
+            Phase::Pre,
+            Some("git"),
+            Path::new("/"),
+            &[("CLAUDECODE", "1")],
+        ));
+        assert!(git.fired.is_empty());
+    }
+
+    #[test]
+    fn agent_browser_strict_pack_needs_an_allowlist_in_the_environment() {
+        let e = Engine::from_toml(r#"use = ["agent-browser-strict"]"#).unwrap();
+        let open = ["open", "https://a.com"];
+        assert!(!ab(&e, true, &[], &open).proceed);
+        assert!(
+            ab(
+                &e,
+                true,
+                &[("AGENT_BROWSER_ALLOWED_DOMAINS", "a.com")],
+                &open
+            )
+            .proceed
+        );
+        assert!(ab(&e, false, &[], &open).proceed);
+        assert!(ab(&e, true, &[], &["snapshot"]).proceed);
     }
 }
