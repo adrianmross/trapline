@@ -35,6 +35,21 @@ class ReleaseInstall(unittest.TestCase):
     def save_manifest(self):
         (self.root / 'manifest.json').write_text(json.dumps(self.manifest))
 
+    def test_offline_docs_are_verified_and_unknown_files_refused(self):
+        path = self.root / 'docs/first-use.md'
+        path.parent.mkdir()
+        path.write_text('offline first use')
+        self.manifest['files']['docs/first-use.md'] = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.save_manifest()
+        release.install(self.root, self.home)
+        path.write_text('tampered')
+        with self.assertRaisesRegex(ValueError, 'checksum'):
+            release.install(self.root, self.home)
+        self.manifest['files']['docs/unrecognized.md'] = '0' * 64
+        self.save_manifest()
+        with self.assertRaisesRegex(ValueError, 'file list'):
+            release.install(self.root, self.home)
+
     def test_install_is_additive_idempotent_and_does_not_modify_trust(self):
         hooks = self.home / '.codex/hooks.json'
         hooks.parent.mkdir(parents=True)
@@ -49,6 +64,20 @@ class ReleaseInstall(unittest.TestCase):
         self.assertEqual((self.home / '.local/bin/trapline').stat().st_mode & 0o777, 0o755)
         self.assertEqual(len(json.loads(hooks.read_text())['hooks']['SessionStart']), 2)
         self.assertEqual(result['version'], '0.2.0')
+
+    def test_known_managed_profile_upgrades_but_custom_profile_is_preserved(self):
+        release.install(self.root, self.home)
+        profile = self.root / 'examples/codex.toml'
+        profile.write_text('use = ["devenv-agent", "handoff"]\n')
+        self.manifest['files']['examples/codex.toml'] = hashlib.sha256(profile.read_bytes()).hexdigest()
+        self.save_manifest()
+        release.install(self.root, self.home)
+        installed = self.home / '.config/trapline/codex.toml'
+        self.assertIn('handoff', installed.read_text())
+        installed.write_text('custom')
+        with self.assertRaises(ValueError):
+            release.install(self.root, self.home)
+        self.assertEqual(installed.read_text(), 'custom')
 
     def test_bad_artifacts_or_custom_profiles_change_no_binary(self):
         (self.root / 'bin/nudge').write_bytes(b'tampered')

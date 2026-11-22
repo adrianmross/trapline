@@ -19,7 +19,8 @@ def install(root, home, adopt=False):
         raise ValueError('Release does not match this host')
     expected = {'bin/trapline', 'bin/nudge', 'scripts/install-release.py', 'scripts/install-codex-guidance.py',
                 'examples/codex.toml', 'examples/codex-hooks.json', 'README.md'}
-    if set(manifest['files']) != expected:
+    optional_docs = {'docs/first-use.md', 'docs/protocol.md'}
+    if not expected <= set(manifest['files']) or set(manifest['files']) - expected - optional_docs:
         raise ValueError('Invalid release file list')
     for name, digest in manifest['files'].items():
         path = root / name

@@ -28,6 +28,11 @@ runner. Where a tool already owns a job, a pack checks state and points at it.
 
 ## Quickstart
 
+Start with [first use, team guidance and quiet hints](docs/first-use.md).
+On macOS, `brew install adrianmross/private/trapline` installs both commands.
+The source-build alternative is below.
+
+
 ```sh
 cargo install --path crates/trapline --path crates/nudge
 ```
@@ -288,7 +293,7 @@ such as `npx`.
 ## Status
 
 Early. Working: the event protocol, the rules engine, the `devenv`, `git` and
-`wt` packs, zsh glue. Planned: `once` for hints, bash and fish glue,
+`wt` packs, zsh glue. Planned: bash and fish glue,
 `nudge explain`, repo-level `.trapline.toml` with an allow step (repo rules
 limited to `hint`/`warn` until allowed), `trapline serve` (JSON-RPC) and an
 editor plugin.
@@ -326,7 +331,7 @@ configured for this CLI repository.
 ## Native releases
 
 Tagged releases contain native archives for the platforms built by CI, plus
-SHA-256 files. Compare the archive checksum against the release metadata before
+SHA-256 files and the first-use/protocol guides for offline reading. Compare the archive checksum against the release metadata before
 extracting it. From the extracted directory run:
 
 ```sh
@@ -340,3 +345,17 @@ A previous manual installation needs `--adopt-existing` after you review it;
 managed binaries that have changed are refused. Backups and the pinned version
 receipt live under `~/.local/state/trapline`. Python 3.9+ suffices to install;
 Rust and Nix are only build-time requirements.
+
+## Handoff guidance
+
+The built-in `handoff` nudge pack supplies advice for checkpoint ownership,
+preflight, recovery, returned results and local trust review. Inspect it with
+`nudge show handoff`; use `trapline explain session_start` for rule decisions.
+The shipped Codex profile includes this pack. Known, unchanged managed profiles
+upgrade through the native installer; customized profiles are preserved. Hooks
+and their trust remain owned by each host. No approval settings are copied.
+Both commands are also available from `adrianmross/private/trapline` on macOS.
+
+Standalone guidance setup records its managed profile hash separately from native
+binary installation. Repeated private-tap upgrades preserve customized profiles
+and reuse an equivalent existing stable hook command, avoiding duplicate hooks.

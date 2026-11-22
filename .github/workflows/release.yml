@@ -38,6 +38,8 @@ jobs:
           fixture=$(mktemp -d)
           trap 'rm -rf "$fixture"' EXIT
           tar xzf dist/trapline-*.tar.gz -C "$fixture"
+          test -f "$fixture"/trapline-*/docs/first-use.md
+          test -f "$fixture"/trapline-*/docs/protocol.md
           python3 "$fixture"/trapline-*/scripts/install-release.py --home "$fixture/home"
           "$fixture/home/.local/bin/trapline" --version
           "$fixture/home/.local/bin/nudge" --version

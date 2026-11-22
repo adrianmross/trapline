@@ -29,7 +29,8 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     files = {**{'bin/' + n: (args.binary_dir or root / 'target/release') / n for n in ('trapline', 'nudge')},
              **{'scripts/' + n: root / 'scripts' / n for n in ('install-release.py', 'install-codex-guidance.py')},
-             **{'examples/' + n: root / 'examples' / n for n in ('codex.toml', 'codex-hooks.json')}, 'README.md': root / 'README.md'}
+             **{'examples/' + n: root / 'examples' / n for n in ('codex.toml', 'codex-hooks.json')},
+             **{'docs/' + n: root / 'docs' / n for n in ('first-use.md', 'protocol.md')}, 'README.md': root / 'README.md'}
     for binary in ('trapline', 'nudge'):
         if subprocess.check_output([str(files['bin/' + binary]), '--version'], text=True).strip() != binary + ' ' + version:
             raise ValueError('Release binary does not match source version')
