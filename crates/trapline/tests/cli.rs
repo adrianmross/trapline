@@ -831,3 +831,45 @@ fn deny_read_really_hides_a_file_on_macos() {
         "sec/key must be unreadable"
     );
 }
+
+#[test]
+fn not_found_handler_never_recurses() {
+    let glue = Command::new(env!("CARGO_BIN_EXE_trapline"))
+        .args(["hook", "zsh"])
+        .output()
+        .unwrap();
+    let d = std::env::temp_dir().join(format!("trapline-cnf-{}", std::process::id()));
+    fs::create_dir_all(&d).unwrap();
+    let glue_path = d.join("glue.zsh");
+    fs::write(&glue_path, &glue.stdout).unwrap();
+    // trapline off PATH (the hint's `command trapline` re-enters the handler),
+    // then with the helpers dropped as a shell snapshot does.
+    for extra in ["", "unfunction _trapline_notfound_hint _trapline_orig_cnf;"] {
+        let script = format!(
+            "source {}; PATH=/usr/bin:/bin; {extra} trapline_no_such_cmd; print rc=$?",
+            glue_path.display()
+        );
+        // Unfixed, the recursion forks new shells forever; give up after 10s.
+        let mut child = Command::new("zsh")
+            .args(["-f", "-c", &script])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() > deadline {
+                child.kill().unwrap();
+                panic!("{extra:?}: command_not_found_handler recursed");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let out = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("rc=127"),
+            "{extra:?}: {stdout} {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
