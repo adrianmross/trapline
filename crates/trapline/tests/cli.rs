@@ -796,6 +796,7 @@ fn every_sandbox_target_comes_from_the_same_rules() {
     let rt: serde_json::Value =
         serde_json::from_str(&sandbox_out(&plain, "runtime", &repo)).unwrap();
     assert_eq!(rt["network"]["allowedDomains"], serde_json::json!([]));
+    assert_eq!(rt["network"]["deniedDomains"], serde_json::json!([]));
 }
 
 #[test]
